@@ -1,0 +1,28 @@
+/*
+ * Cursor strategy across React Flow surfaces.
+ *
+ * - Hierarchy view (.hierarchy-flow) enables `nodesDraggable` so users can
+ *   rearrange the tree visually — show grab / grabbing cursors.
+ * - Dependency / Graph view (.graph-flow) keeps `nodesDraggable={false}`
+ *   because positions are recomputed each render — show pointer to
+ *   advertise that the only interaction is "click to inspect".
+ *
+ * The pane keeps its native grab/grabbing cursors for panning the canvas.
+ */
+.hierarchy-flow .react-flow__node {
+  cursor: grab;
+}
+.hierarchy-flow .react-flow__node:active,
+.hierarchy-flow .react-flow__node.dragging {
+  cursor: grabbing;
+}
+
+.graph-flow .react-flow__node {
+  cursor: pointer;
+}
+
+/* Hide the connection handles since we never connect nodes manually. */
+.react-flow__handle {
+  pointer-events: none;
+  opacity: 0;
+}
