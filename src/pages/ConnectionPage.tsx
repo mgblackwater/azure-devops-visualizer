@@ -71,7 +71,7 @@ export default function ConnectionPage(): JSX.Element {
         organizationUrl: organizationUrl.trim(),
         personalAccessToken: pat.trim()
       }).unwrap()
-      navigate('/workspace', { replace: true })
+      navigate('/home', { replace: true })
     } catch {
       // RTK Query stores the error in saveState.error.
     }

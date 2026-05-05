@@ -5,6 +5,7 @@ import {
 } from '@reduxjs/toolkit/query/react'
 import { IPC, type IpcArgs, type IpcChannel } from '@shared/contract'
 import type {
+  AdoComment,
   AdoConnectionInfo,
   AdoIteration,
   AdoJsonPatch,
@@ -12,6 +13,9 @@ import type {
   AdoSavedQuery,
   AdoTeam,
   AdoTeamMember,
+  AdoWiki,
+  AdoWikiPage,
+  AdoWikiSearchHit,
   AdoWiqlResult,
   AdoWorkItem,
   IpcError
@@ -77,7 +81,7 @@ const ipcBaseQuery: BaseQueryFn<
 export const adoApi = createApi({
   reducerPath: 'adoApi',
   baseQuery: ipcBaseQuery,
-  tagTypes: ['Connection', 'Projects', 'Teams', 'Iterations', 'SavedQueries', 'WorkItems', 'WorkItem'],
+  tagTypes: ['Connection', 'Projects', 'Teams', 'Iterations', 'SavedQueries', 'WorkItems', 'WorkItem', 'Wikis'],
   endpoints: (build) => ({
     getConnection: build.query<AdoConnectionInfo, void>({
       query: () => ({ channel: IPC.ConnectionGet }),
@@ -222,6 +226,87 @@ export const adoApi = createApi({
       // them around indefinitely so re-rendering the same description
       // doesn't re-fetch every image.
       keepUnusedDataFor: 24 * 60 * 60
+    }),
+
+    /**
+     * For a list of work-item ids, return a small summary (timestamp,
+     * snippet, author) of the latest comment whose text contains
+     * `searchText` — typically the user's display name. Used by the
+     * Workspace "Mentions me" tab to both sort by latest mention and
+     * preview the matching comment inline without a follow-up fetch.
+     */
+    getLatestMentions: build.query<
+      {
+        byId: Record<
+          number,
+          { date: string; snippet: string; author?: string } | null
+        >
+      },
+      { projectId: string; ids: number[]; searchText: string }
+    >({
+      query: (args) => ({ channel: IPC.WorkItemsLatestMentions, args }),
+      // Comments don't churn at sub-minute granularity; a short cache
+      // window keeps the UI snappy when the user toggles tabs.
+      keepUnusedDataFor: 60
+    }),
+
+    /**
+     * All comments on a single work item, newest first. Used by the
+     * drawer's Discussion section. Cached briefly so flipping between
+     * Details/Edit tabs in the drawer doesn't re-hit the network.
+     */
+    listWorkItemComments: build.query<
+      { comments: AdoComment[] },
+      { projectId: string; id: number }
+    >({
+      query: (args) => ({ channel: IPC.WorkItemsListComments, args }),
+      keepUnusedDataFor: 60,
+      providesTags: (_r, _e, arg) => [{ type: 'WorkItem' as const, id: arg.id }]
+    }),
+
+    /**
+     * Wikis registered against the project. ADO returns project wikis and
+     * any code wikis that share the project. Cached briefly via the main
+     * process — re-listing on every page nav would be wasteful.
+     */
+    listWikis: build.query<AdoWiki[], { projectId: string }>({
+      query: (args) => ({ channel: IPC.WikiList, args }),
+      providesTags: ['Wikis']
+    }),
+
+    /**
+     * Recursive page tree for one wiki, content omitted. Drives the
+     * sidebar expander.
+     */
+    getWikiPageTree: build.query<
+      AdoWikiPage,
+      { projectId: string; wikiId: string }
+    >({
+      query: (args) => ({ channel: IPC.WikiPageTree, args }),
+      keepUnusedDataFor: 60
+    }),
+
+    /** Body of a single wiki page (markdown). Cached so back/forward in
+     *  the tree doesn't hit the network. */
+    getWikiPage: build.query<
+      AdoWikiPage,
+      { projectId: string; wikiId: string; path: string }
+    >({
+      query: (args) => ({ channel: IPC.WikiGetPage, args }),
+      keepUnusedDataFor: 60
+    }),
+
+    /**
+     * Server-side wiki search. May reject with `NOT_FOUND` when the org
+     * doesn't have the Search extension installed — UI handles that
+     * gracefully by falling back to client-side substring filter.
+     */
+    searchWiki: build.query<
+      { count: number; results: AdoWikiSearchHit[] },
+      { projectId: string; term: string; top?: number }
+    >({
+      query: (args) => ({ channel: IPC.WikiSearch, args }),
+      keepUnusedDataFor: 30
     })
   })
 })
@@ -241,5 +326,11 @@ export const {
   useBatchGetWorkItemsQuery,
   useGetWorkItemWithRelationsQuery,
   usePatchWorkItemMutation,
-  useFetchAttachmentQuery
+  useFetchAttachmentQuery,
+  useGetLatestMentionsQuery,
+  useListWorkItemCommentsQuery,
+  useListWikisQuery,
+  useGetWikiPageTreeQuery,
+  useGetWikiPageQuery,
+  useSearchWikiQuery
 } = adoApi

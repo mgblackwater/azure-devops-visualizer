@@ -1,0 +1,55 @@
+/*
+ * Dark-mode overrides for FullCalendar.
+ *
+ * FullCalendar exposes its own CSS-variable surface (--fc-*), which makes
+ * a clean dark-mode opt-in possible: redefining those tokens under
+ * `[data-theme="dark"]` cascades through every cell, gridline, today
+ * highlight, and toolbar button without touching individual selectors.
+ *
+ * Event background / border colours are set per-event by CalendarView via
+ * `colorForType` / `colorForState`, so we deliberately do NOT touch the
+ * --fc-event-* tokens — the per-event inline styles take precedence and
+ * keep brand colours intact.
+ */
+
+[data-theme='dark'] .fc {
+  --fc-border-color: rgba(255, 255, 255, 0.12);
+  --fc-page-bg-color: transparent;
+  --fc-neutral-bg-color: rgba(255, 255, 255, 0.04);
+  --fc-list-event-hover-bg-color: rgba(255, 255, 255, 0.06);
+
+  --fc-today-bg-color: rgba(77, 168, 255, 0.12);
+  --fc-now-indicator-color: #ff6b6b;
+
+  --fc-button-bg-color: #1f242d;
+  --fc-button-border-color: rgba(255, 255, 255, 0.16);
+  --fc-button-text-color: #e6e6e6;
+  --fc-button-hover-bg-color: #2a2f39;
+  --fc-button-hover-border-color: rgba(255, 255, 255, 0.24);
+  --fc-button-active-bg-color: #3a4250;
+  --fc-button-active-border-color: rgba(255, 255, 255, 0.32);
+
+  color: #e6e6e6;
+}
+
+[data-theme='dark'] .fc-theme-standard td,
+[data-theme='dark'] .fc-theme-standard th,
+[data-theme='dark'] .fc-scrollgrid {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+[data-theme='dark'] .fc-col-header-cell,
+[data-theme='dark'] .fc-toolbar-title,
+[data-theme='dark'] .fc-list-day-cushion,
+[data-theme='dark'] .fc-daygrid-day-number {
+  color: #e6e6e6;
+}
+
+[data-theme='dark'] .fc-list-day-cushion {
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+/* Day number on "other-month" cells — needs to stay readable but muted. */
+[data-theme='dark'] .fc-day-other .fc-daygrid-day-top {
+  opacity: 0.45;
+}

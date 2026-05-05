@@ -115,6 +115,24 @@ export interface AdoWiqlResult {
   asOf?: string
 }
 
+/**
+ * A single comment / discussion entry on a work item. Mirrors the subset
+ * of fields exposed by `_apis/wit/workItems/{id}/comments` that this app
+ * actually renders. `text` is HTML — sanitize before injecting.
+ */
+export interface AdoComment {
+  id: number
+  workItemId?: number
+  /** HTML body. Includes @-mention markup and inline images. */
+  text: string
+  createdDate?: string
+  modifiedDate?: string
+  createdBy?: AdoIdentity
+  modifiedBy?: AdoIdentity
+  /** Monotonic version that increments on edit; undefined for older comments. */
+  version?: number
+}
+
 export type AdoJsonPatchOp = 'add' | 'replace' | 'remove' | 'test'
 
 export interface AdoJsonPatch {
@@ -135,6 +153,52 @@ export interface AdoConnectionInfo {
 export interface AdoConnectionInput {
   organizationUrl: string
   personalAccessToken: string
+}
+
+/**
+ * A single wiki registered against a project. Project wikis are auto-
+ * provisioned by ADO; code wikis are git-backed and have a
+ * `repositoryId` + `mappedPath` pointing at the repo root.
+ */
+export interface AdoWiki {
+  id: string
+  name: string
+  type: 'projectWiki' | 'codeWiki' | string
+  projectId: string
+  repositoryId?: string
+  mappedPath?: string
+  url?: string
+}
+
+/**
+ * A page in a wiki. The same shape is used both for a single-page fetch
+ * (with `content` populated) and for the recursive page tree (where
+ * `subPages` is filled by the server).
+ */
+export interface AdoWikiPage {
+  id?: number
+  path: string
+  order?: number
+  isParentPage?: boolean
+  gitItemPath?: string
+  content?: string
+  url?: string
+  /** Recursive child pages when fetched with recursionLevel=Full. */
+  subPages?: AdoWikiPage[]
+}
+
+/**
+ * A single hit returned by the ADO wiki search service. `highlights` are
+ * server-supplied HTML fragments containing `<em>…</em>` markers around
+ * the matched terms; the renderer sanitises before injecting.
+ */
+export interface AdoWikiSearchHit {
+  fileName: string
+  path: string
+  hits: { fieldReferenceName: string; highlights: string[] }[]
+  project: { id: string; name: string }
+  wiki: { id: string; name: string }
+  contentId?: string
 }
 
 export interface IpcError {

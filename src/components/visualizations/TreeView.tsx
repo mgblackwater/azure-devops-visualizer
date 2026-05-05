@@ -264,7 +264,8 @@ export default function TreeView(): JSX.Element {
         useFlexGap
         sx={{
           p: 1.5,
-          borderBottom: '1px solid rgba(0,0,0,0.08)',
+          borderBottom: '1px solid',
+          borderColor: 'divider',
           flexWrap: 'wrap',
           rowGap: 1
         }}
@@ -381,10 +382,15 @@ function TreeRowView({
         px: 1,
         py: 0.5,
         pl: `${row.depth * INDENT_PX + 8}px`,
-        borderBottom: '1px solid rgba(0,0,0,0.04)',
-        bgcolor: focused ? 'rgba(26,115,232,0.08)' : 'transparent',
+        borderBottom: '1px solid',
+        borderColor: 'divider',
+        // Focused row uses the primary blue at low alpha so it reads on
+        // both light (FAFAFA-ish) and dark (#161A22-ish) surfaces.
+        bgcolor: focused ? 'rgba(26,115,232,0.16)' : 'transparent',
         cursor: 'pointer',
-        '&:hover': { bgcolor: focused ? 'rgba(26,115,232,0.12)' : 'rgba(0,0,0,0.03)' }
+        '&:hover': {
+          bgcolor: focused ? 'rgba(26,115,232,0.22)' : 'action.hover'
+        }
       }}
       onClick={onOpen}
     >
@@ -405,7 +411,7 @@ function TreeRowView({
           color: 'text.secondary',
           cursor: row.hasChildren ? 'pointer' : 'default',
           opacity: row.hasChildren ? 1 : 0,
-          '&:hover': row.hasChildren ? { bgcolor: 'rgba(0,0,0,0.06)' } : undefined
+          '&:hover': row.hasChildren ? { bgcolor: 'action.hover' } : undefined
         }}
         aria-label={row.expanded ? 'Collapse' : 'Expand'}
       >
@@ -459,8 +465,14 @@ function TreeRowView({
             width: 22,
             height: 22,
             borderRadius: '50%',
-            bgcolor: owner === 'Unassigned' ? '#E0E3E7' : '#1A73E8',
-            color: owner === 'Unassigned' ? '#5F6368' : '#FFFFFF',
+            bgcolor: (theme) =>
+              owner === 'Unassigned'
+                ? theme.palette.action.disabledBackground
+                : '#1A73E8',
+            color: (theme) =>
+              owner === 'Unassigned'
+                ? theme.palette.text.secondary
+                : '#FFFFFF',
             display: 'inline-flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -484,7 +496,12 @@ function TreeRowView({
             height: 8,
             borderRadius: '50%',
             bgcolor: stateColor,
-            border: '1px solid rgba(0,0,0,0.08)'
+            border: (theme) =>
+              `1px solid ${
+                theme.palette.mode === 'dark'
+                  ? 'rgba(255,255,255,0.18)'
+                  : 'rgba(0,0,0,0.08)'
+              }`
           }}
         />
         <Typography variant="caption" color="text.secondary" sx={{ fontSize: 11 }}>

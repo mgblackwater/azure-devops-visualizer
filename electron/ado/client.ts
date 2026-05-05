@@ -274,3 +274,100 @@ export function invalidateCacheForPathPrefix(prefix: string): void {
 export function clearCache(): void {
   cache.clear()
 }
+
+/**
+ * Resolve the identity associated with the currently configured PAT (or
+ * the one passed in `opts`, used during the initial connection probe).
+ *
+ * We hit the locator service's `_apis/connectionData` endpoint, which is
+ * authenticated, low-cost, and returns the caller's user record without
+ * needing the `vso.profile` scope on the PAT (so it works with the
+ * minimum-scoped tokens the app advertises).
+ *
+ * `connectionData` is a long-lived ADO endpoint that historically used
+ * `api-version=1.0`. Newer versions (7.x) work for cloud DevOps but
+ * sometimes 400 on Azure DevOps Server installs, so we pin 1.0 here for
+ * the widest compatibility — every other call still uses the modern 7.1
+ * default. We pass `connectOptions=none` to keep the response payload
+ * tiny; we only need the user record.
+ *
+ * Returns `null` when the endpoint declines to identify the caller —
+ * e.g. against an on-prem Azure DevOps Server with auth disabled, or
+ * when the network request fails — so the UI can fall back gracefully
+ * without throwing.
+ */
+export async function getAuthenticatedIdentity(opts?: {
+  organizationUrl?: string
+  token?: string
+}): Promise<{
+  displayName: string
+  id?: string
+  uniqueName?: string
+  descriptor?: string
+} | null> {
+  interface ConnectionDataResponse {
+    authenticatedUser?: ConnectionDataUser
+    authorizedUser?: ConnectionDataUser
+  }
+  interface ConnectionDataUser {
+    id?: string
+    providerDisplayName?: string
+    customDisplayName?: string
+    /** Common on cloud DevOps; falls back to provider/custom names. */
+    displayName?: string
+    /** Email address — most reliable for `uniqueName`. */
+    mailAddress?: string
+    /** AAD principal name on cloud DevOps. */
+    principalName?: string
+    subjectDescriptor?: string
+    properties?: {
+      Account?: { $value?: string }
+    }
+  }
+  try {
+    const data = await adoFetch<ConnectionDataResponse>({
+      method: 'GET',
+      path: '/_apis/connectionData',
+      baseUrl: opts?.organizationUrl,
+      token: opts?.token,
+      apiVersion: '1.0',
+      query: { connectOptions: 'none' },
+      cacheTtlMs: 0
+    })
+    const u = data.authenticatedUser ?? data.authorizedUser
+    if (!u) {
+      console.warn(
+        '[ado/identity] connectionData returned no user; mentions filter will be unavailable'
+      )
+      return null
+    }
+    const displayName =
+      u.customDisplayName ||
+      u.displayName ||
+      u.providerDisplayName ||
+      u.mailAddress ||
+      u.principalName ||
+      u.properties?.Account?.$value ||
+      'Unknown user'
+    return {
+      displayName,
+      id: u.id,
+      uniqueName:
+        u.mailAddress ||
+        u.principalName ||
+        u.properties?.Account?.$value,
+      descriptor: u.subjectDescriptor
+    }
+  } catch (err) {
+    // Don't let identity resolution failures break the connection flow —
+    // the app remains functional without it; only "Mentions me" needs
+    // the display name and it surfaces a manual retry. Log so dev users
+    // can diagnose; tightly-scoped PATs and offline networks are the
+    // most common reasons this fails.
+    console.warn(
+      '[ado/identity] failed to resolve authenticated user:',
+      err instanceof Error ? err.message : String(err)
+    )
+    return null
+  }
+}

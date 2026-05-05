@@ -96,39 +96,47 @@ export default function RichDescription({ html }: { html: string }): JSX.Element
   return (
     <Box>
       <Box
-        sx={{
-          fontSize: 13,
-          lineHeight: 1.55,
-          wordBreak: 'break-word',
-          '& img': {
-            maxWidth: '100%',
-            height: 'auto',
-            borderRadius: 0.5,
-            my: 0.5,
-            display: 'block'
-          },
-          '& p': { my: 0.75 },
-          '& ul, & ol': { pl: 3, my: 0.5 },
-          '& code': {
-            fontFamily: 'monospace',
-            bgcolor: 'rgba(0,0,0,0.06)',
-            px: 0.5,
-            borderRadius: 0.5
-          },
-          '& pre': {
-            bgcolor: 'rgba(0,0,0,0.06)',
-            p: 1,
-            borderRadius: 1,
-            overflow: 'auto'
-          },
-          '& a': { color: 'primary.main' },
-          '& table': { borderCollapse: 'collapse', my: 1 },
-          '& th, & td': { border: '1px solid rgba(0,0,0,0.12)', px: 1, py: 0.5 },
-          '& blockquote': {
-            borderLeft: '3px solid rgba(0,0,0,0.18)',
-            pl: 1.5,
-            my: 1,
-            color: 'text.secondary'
+        sx={(theme) => {
+          const codeBg =
+            theme.palette.mode === 'dark'
+              ? 'rgba(255,255,255,0.08)'
+              : 'rgba(0,0,0,0.06)'
+          const tableBorder = theme.palette.divider
+          return {
+            fontSize: 13,
+            lineHeight: 1.55,
+            wordBreak: 'break-word',
+            color: theme.palette.text.primary,
+            '& img': {
+              maxWidth: '100%',
+              height: 'auto',
+              borderRadius: 0.5,
+              my: 0.5,
+              display: 'block'
+            },
+            '& p': { my: 0.75 },
+            '& ul, & ol': { pl: 3, my: 0.5 },
+            '& code': {
+              fontFamily: 'monospace',
+              bgcolor: codeBg,
+              px: 0.5,
+              borderRadius: 0.5
+            },
+            '& pre': {
+              bgcolor: codeBg,
+              p: 1,
+              borderRadius: 1,
+              overflow: 'auto'
+            },
+            '& a': { color: 'primary.main' },
+            '& table': { borderCollapse: 'collapse', my: 1 },
+            '& th, & td': { border: `1px solid ${tableBorder}`, px: 1, py: 0.5 },
+            '& blockquote': {
+              borderLeft: `3px solid ${tableBorder}`,
+              pl: 1.5,
+              my: 1,
+              color: 'text.secondary'
+            }
           }
         }}
         dangerouslySetInnerHTML={{ __html: renderedHtml }}

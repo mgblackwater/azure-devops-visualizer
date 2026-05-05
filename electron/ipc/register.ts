@@ -5,9 +5,15 @@ import type { AdoConnectionInfo, IpcError } from '@shared/adoTypes'
 import {
   clearConnection,
   getConnectionInfo,
+  needsIdentityBackfill,
+  persistAuthenticatedUser,
   setConnection
 } from '../auth/tokenStore'
-import { AdoApiError, clearCache } from '../ado/client'
+import {
+  AdoApiError,
+  clearCache,
+  getAuthenticatedIdentity
+} from '../ado/client'
 import {
   listIterations,
   listProjects,
@@ -17,12 +23,20 @@ import {
 } from '../ado/projects'
 import {
   batchGetWorkItems,
+  getLatestMentions,
   getWorkItemWithRelations,
+  listComments,
   patchWorkItem,
   runSavedQuery,
   runWiql
 } from '../ado/workItems'
 import { fetchAttachmentAsBase64 } from '../ado/attachments'
+import {
+  getPageTree,
+  getWikiPage,
+  listWikis,
+  searchWiki
+} from '../ado/wiki'
 
 type Handler = (...args: unknown[]) => Promise<unknown> | unknown
 
@@ -49,7 +63,21 @@ function wrap<T>(fn: () => Promise<T> | T): Promise<T> {
 
 export function registerIpcHandlers(ipcMain: IpcMain): void {
   const handlers: Partial<Record<IpcChannel, Handler>> = {
-    [IPC.ConnectionGet]: () => wrap(() => getConnectionInfo()),
+    [IPC.ConnectionGet]: () =>
+      wrap(async () => {
+        // Lazy identity backfill: vaults written before identity was
+        // persisted simply don't have it on disk, and re-typing the PAT
+        // would be annoying. If the connection is healthy but identity
+        // is missing, resolve it once and write it back so subsequent
+        // calls are instant. Doing this in the IPC layer (instead of
+        // tokenStore) keeps tokenStore free of the cycle that would
+        // exist if it imported `ado/client`.
+        if (needsIdentityBackfill()) {
+          const identity = await getAuthenticatedIdentity()
+          if (identity) await persistAuthenticatedUser(identity)
+        }
+        return getConnectionInfo()
+      }),
 
     [IPC.ConnectionSet]: (_e, args) =>
       wrap(async () => {
@@ -57,8 +85,23 @@ export function registerIpcHandlers(ipcMain: IpcMain): void {
           organizationUrl: string
           personalAccessToken: string
         }
-        const projects = await listProjects({ organizationUrl, token: personalAccessToken })
-        const info = await setConnection(organizationUrl, personalAccessToken)
+        // Validate the PAT by listing projects up-front, then resolve the
+        // user identity in parallel so the persisted connection record
+        // includes the user's display name. The identity probe is best-
+        // effort; a null result just leaves the workspace's "Mentions me"
+        // tab unable to filter, but the rest of the app keeps working.
+        const [projects, identity] = await Promise.all([
+          listProjects({ organizationUrl, token: personalAccessToken }),
+          getAuthenticatedIdentity({
+            organizationUrl,
+            token: personalAccessToken
+          })
+        ])
+        const info = await setConnection(
+          organizationUrl,
+          personalAccessToken,
+          identity ?? undefined
+        )
         clearCache()
         // Touch the cached projects list so the renderer's first call is fast.
         void projects
@@ -142,8 +185,34 @@ export function registerIpcHandlers(ipcMain: IpcMain): void {
     [IPC.WorkItemsPatch]: (_e, args) =>
       wrap(() => patchWorkItem(args as Parameters<typeof patchWorkItem>[0])),
 
+    [IPC.WorkItemsLatestMentions]: (_e, args) =>
+      wrap(() =>
+        getLatestMentions(args as Parameters<typeof getLatestMentions>[0])
+      ),
+
+    [IPC.WorkItemsListComments]: (_e, args) =>
+      wrap(() =>
+        listComments(args as Parameters<typeof listComments>[0])
+      ),
+
     [IPC.AttachmentFetch]: (_e, args) =>
       wrap(() => fetchAttachmentAsBase64((args as { url: string }).url)),
+
+    [IPC.WikiList]: (_e, args) => {
+      const a = args as { projectId: string }
+      return wrap(() => listWikis(a.projectId))
+    },
+
+    [IPC.WikiPageTree]: (_e, args) => {
+      const a = args as { projectId: string; wikiId: string }
+      return wrap(() => getPageTree(a.projectId, a.wikiId))
+    },
+
+    [IPC.WikiGetPage]: (_e, args) =>
+      wrap(() => getWikiPage(args as Parameters<typeof getWikiPage>[0])),
+
+    [IPC.WikiSearch]: (_e, args) =>
+      wrap(() => searchWiki(args as Parameters<typeof searchWiki>[0])),
 
     [IPC.ShellOpenExternal]: (_e, args) =>
       wrap(async () => {

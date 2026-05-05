@@ -1,5 +1,6 @@
 import { adoFetch } from './client'
 import type {
+  AdoComment,
   AdoJsonPatch,
   AdoWiqlResult,
   AdoWorkItem
@@ -148,6 +149,173 @@ export async function patchWorkItem(args: {
     query: args.bypassRules ? { bypassRules: true } : undefined,
     cacheTtlMs: 0
   })
+}
+
+interface CommentsResponse {
+  totalCount?: number
+  count?: number
+  comments?: AdoComment[]
+}
+
+const COMMENTS_API_VERSION = '7.1-preview.4'
+const COMMENTS_CACHE_TTL_MS = 60_000
+
+/** Lower-cased substring match — ADO's @-mention HTML still embeds the
+ *  visible display name as plain text inside `<span>` tags, so a simple
+ *  contains check works without parsing the markup. */
+function commentMatches(text: string | undefined, needle: string): boolean {
+  if (!text) return false
+  return text.toLowerCase().includes(needle)
+}
+
+/**
+ * Convert HTML to a compact plain-text excerpt suitable for one- or
+ * two-line preview in a list row. Mirrors what the renderer would do
+ * after sanitising, but pre-flattens here so the IPC payload stays
+ * small and the client doesn't need to parse HTML twice.
+ */
+function htmlToSnippet(html: string, maxChars = 200): string {
+  if (!html) return ''
+  // Strip script/style first so their textContent doesn't leak in.
+  const stripped = html
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<\/p>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    // Decode the handful of entities that show up in real ADO comments.
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (stripped.length <= maxChars) return stripped
+  // Try to break on a word boundary so the ellipsis doesn't fall in the
+  // middle of a long mention/word.
+  const cut = stripped.slice(0, maxChars)
+  const lastSpace = cut.lastIndexOf(' ')
+  return (lastSpace > maxChars * 0.6 ? cut.slice(0, lastSpace) : cut) + '…'
+}
+
+/**
+ * For a list of work item ids, return a small summary of the most recent
+ * comment whose text contains `searchText` (case-insensitive). Used by
+ * the renderer's "Mentions me" tab so each row can sort by latest
+ * mention *and* show an inline preview without a second round-trip.
+ *
+ * Implementation notes:
+ * - Comments live on a per-item endpoint; we fan out one HTTP call per
+ *   id, throttled to a small concurrency window so we don't blow past
+ *   ADO's rate limit (~200 req/5s for most tenants).
+ * - Each call is cheap and the response is small. We cache per-id for a
+ *   minute since mentions don't churn at sub-minute granularity.
+ * - Items with no matching comment get `null` so the renderer can rank
+ *   them below items with a real mention timestamp instead of dropping
+ *   them — they did still match the WIQL.
+ */
+export async function getLatestMentions(args: {
+  projectId: string
+  ids: number[]
+  searchText: string
+}): Promise<{
+  byId: Record<number, { date: string; snippet: string; author?: string } | null>
+}> {
+  const out: Record<
+    number,
+    { date: string; snippet: string; author?: string } | null
+  > = {}
+  if (args.ids.length === 0 || !args.searchText.trim()) {
+    for (const id of args.ids) out[id] = null
+    return { byId: out }
+  }
+
+  const needle = args.searchText.toLowerCase()
+  const projectSegment = `/${encodeURIComponent(args.projectId)}`
+  const CONCURRENCY = 8
+
+  async function processOne(id: number): Promise<void> {
+    try {
+      const data = await adoFetch<CommentsResponse>({
+        method: 'GET',
+        path: `${projectSegment}/_apis/wit/workItems/${id}/comments`,
+        apiVersion: COMMENTS_API_VERSION,
+        cacheTtlMs: COMMENTS_CACHE_TTL_MS,
+        cacheKey: `comments:${projectSegment}:${id}`
+      })
+      let bestTs = -1
+      let bestComment: AdoComment | null = null
+      for (const c of data.comments ?? []) {
+        if (!commentMatches(c.text, needle)) continue
+        const ts = c.createdDate ? Date.parse(c.createdDate) : NaN
+        if (!Number.isFinite(ts)) continue
+        if (ts > bestTs) {
+          bestTs = ts
+          bestComment = c
+        }
+      }
+      if (bestComment && bestTs >= 0) {
+        out[id] = {
+          date: new Date(bestTs).toISOString(),
+          snippet: htmlToSnippet(bestComment.text ?? ''),
+          author: bestComment.createdBy?.displayName
+        }
+      } else {
+        out[id] = null
+      }
+    } catch {
+      // Single 404/permission failure shouldn't sink the whole batch.
+      out[id] = null
+    }
+  }
+
+  // Hand-rolled fixed-concurrency worker pool. ids ≤ 100 in practice so
+  // we don't reach for an external queue lib.
+  let cursor = 0
+  const workers: Promise<void>[] = []
+  for (let i = 0; i < Math.min(CONCURRENCY, args.ids.length); i += 1) {
+    workers.push(
+      (async () => {
+        while (true) {
+          const next = cursor++
+          if (next >= args.ids.length) return
+          await processOne(args.ids[next])
+        }
+      })()
+    )
+  }
+  await Promise.all(workers)
+  return { byId: out }
+}
+
+/**
+ * Fetch every comment on a single work item, newest first. Backs the
+ * Discussion section in the work-item drawer.
+ *
+ * Cached briefly so flipping between Details/Edit tabs doesn't re-hit
+ * the network, but short enough that fresh comments show up on a manual
+ * refresh of the drawer.
+ */
+export async function listComments(args: {
+  projectId: string
+  id: number
+}): Promise<{ comments: AdoComment[] }> {
+  const projectSegment = `/${encodeURIComponent(args.projectId)}`
+  const data = await adoFetch<CommentsResponse>({
+    method: 'GET',
+    path: `${projectSegment}/_apis/wit/workItems/${args.id}/comments`,
+    apiVersion: COMMENTS_API_VERSION,
+    cacheTtlMs: COMMENTS_CACHE_TTL_MS,
+    cacheKey: `comments:${projectSegment}:${args.id}`
+  })
+  const comments = [...(data.comments ?? [])].sort((a, b) => {
+    const ta = a.createdDate ? Date.parse(a.createdDate) : 0
+    const tb = b.createdDate ? Date.parse(b.createdDate) : 0
+    return tb - ta
+  })
+  return { comments }
 }
 
 /**

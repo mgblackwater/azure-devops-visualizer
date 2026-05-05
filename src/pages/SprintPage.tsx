@@ -4,9 +4,11 @@ import {
   AlertTitle,
   Autocomplete,
   Box,
+  Button,
   Chip,
   FormControlLabel,
   IconButton,
+  InputAdornment,
   LinearProgress,
   Snackbar,
   Stack,
@@ -18,19 +20,21 @@ import {
   Typography
 } from '@mui/material'
 import RefreshIcon from '@mui/icons-material/Refresh'
+import SearchIcon from '@mui/icons-material/Search'
+import ClearIcon from '@mui/icons-material/Clear'
 import ViewWeekIcon from '@mui/icons-material/ViewWeek'
 import TableChartIcon from '@mui/icons-material/TableChart'
 import { useNavigate } from 'react-router-dom'
 import {
   useBatchGetWorkItemsQuery,
-  useGetConnectionQuery,
   useListIterationsQuery,
   useListTeamMembersQuery,
+  useListTeamsQuery,
   usePatchWorkItemMutation,
   useRunWiqlQuery
 } from '@/store/api/adoApi'
 import { useAppDispatch, useAppSelector } from '@/store'
-import { selectWorkItem } from '@/store/workspaceSlice'
+import { selectWorkItem, setTeam } from '@/store/workspaceSlice'
 import {
   bucketTasks,
   buildSprintWiql,
@@ -51,11 +55,13 @@ import {
   getAssigneeName,
   getState,
   getStackRank,
+  getTags,
   getTitle,
   getType,
   typeBadge
 } from '@/utils/workItemFields'
 import { colorForState, colorForType, readableTextColor } from '@/utils/adoColors'
+import { tokenizeForSearch } from '@/utils/wiql'
 import type { AdoIdentity, AdoIteration, AdoWorkItem } from '@shared/adoTypes'
 
 /* ---------- helpers ---------- */
@@ -130,11 +136,14 @@ function TaskChip({
           py: 0.25,
           borderRadius: 1,
           cursor: 'pointer',
-          background: done ? 'rgba(51,153,51,0.08)' : 'rgba(0,0,0,0.03)',
+          // "Done" gets a subtle green tint that works in both modes;
+          // resting state uses MUI's action.hover token so the chip
+          // settles onto its surrounding row neatly in dark mode too.
+          bgcolor: done ? 'rgba(51,153,51,0.12)' : 'action.hover',
           border: '1px solid',
-          borderColor: done ? 'rgba(51,153,51,0.4)' : 'rgba(0,0,0,0.06)',
+          borderColor: done ? 'rgba(51,153,51,0.4)' : 'divider',
           transition: 'background 120ms',
-          '&:hover': { background: 'rgba(0,120,212,0.12)' },
+          '&:hover': { bgcolor: 'rgba(0,120,212,0.12)' },
           minWidth: 0
         }}
       >
@@ -144,7 +153,12 @@ function TaskChip({
             height: 8,
             borderRadius: '50%',
             background: stateColor,
-            border: '1px solid rgba(0,0,0,0.1)',
+            border: (theme) =>
+              `1px solid ${
+                theme.palette.mode === 'dark'
+                  ? 'rgba(255,255,255,0.18)'
+                  : 'rgba(0,0,0,0.1)'
+              }`,
             flexShrink: 0
           }}
         />
@@ -182,19 +196,15 @@ export default function SprintPage(): JSX.Element {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
   const { projectId, teamId } = useAppSelector((s) => s.workspace)
-  const { data: connection } = useGetConnectionQuery()
-  const me = connection?.authenticatedUser?.uniqueName?.toLowerCase()
 
   const [iterationPath, setIterationPath] = useState<string | null>(null)
-  const [hideDone, setHideDone] = useState(false)
-  const [onlyMine, setOnlyMine] = useState(false)
   /**
-   * Whether the user filter / "My rows only" toggle should also consider
-   * task-level assignees. Off by default so the row stays the unit of
-   * filtering — picking a person shows every PBI/Bug they own with all
-   * their tasks intact (matching the user's mental model of "their work
-   * for the sprint"). Turning it on adds task assignees to the match and
-   * narrows each row's lanes to only the matching tasks.
+   * Whether the user filter should also consider task-level assignees.
+   * Off by default so the row stays the unit of filtering — picking a
+   * person shows every PBI/Bug they own with all their tasks intact
+   * (matching the user's mental model of "their work for the sprint").
+   * Turning it on adds task assignees to the match and narrows each
+   * row's lanes to only the matching tasks.
    */
   const [includeTasksInFilter, setIncludeTasksInFilter] = useState(false)
   /** Selected uniqueName values; the special token `__unassigned__` means
@@ -202,7 +212,35 @@ export default function SprintPage(): JSX.Element {
   const [selectedUsers, setSelectedUsers] = useState<string[]>([])
   /** Selected work-item types to include as rows. Empty = show all. */
   const [selectedTypes, setSelectedTypes] = useState<string[]>([])
+  /**
+   * Selected ADO `System.State` names. When non-empty, only tasks whose
+   * state is in the set appear inside the Kanban lanes. The set holds raw
+   * state names ("New", "Active", "Resolved", …), not the normalised lane
+   * keys, so the user can disambiguate states that share a lane (e.g.
+   * filter "Pending Review" without also pulling in "Active").
+   *
+   * Standalone rows (a PBI/Bug without children) are also filtered by
+   * their *own* state so the row strip itself respects the filter — a
+   * lone Bug that's "New" stays hidden when the user filters to "Active".
+   */
+  const [selectedStates, setSelectedStates] = useState<string[]>([])
+  /**
+   * Free-text filter that runs across the row's PBI/Bug fields *and* every
+   * task under it. Tokenized on whitespace; a row is kept when every
+   * token appears somewhere in the row's combined text (id, title, type,
+   * state, assignee, tags). Pure substring match — keeps it predictable
+   * and fast for the relatively small row sets in a sprint.
+   */
+  const [textFilter, setTextFilter] = useState('')
   const [viewMode, setViewMode] = useState<'matrix' | 'kanban'>('kanban')
+
+  // Team selection lives on this page since iterations are team-scoped.
+  // The list itself is project-scoped, so we kick it off as soon as a
+  // project is picked.
+  const teamsQ = useListTeamsQuery(
+    projectId ? { projectId } : (undefined as never),
+    { skip: !projectId }
+  )
 
   const iterationsQ = useListIterationsQuery(
     projectId && teamId ? { projectId, teamId } : (undefined as never),
@@ -371,32 +409,87 @@ export default function SprintPage(): JSX.Element {
   const typeFilterActive = selectedTypes.length > 0
   const typeSet = useMemo(() => new Set(selectedTypes), [selectedTypes])
 
+  /**
+   * Distinct ADO state names present in this iteration (from tasks *and*
+   * the row items themselves). Sorted by Kanban-lane order so the chip
+   * strip reads left-to-right as To Do → In Progress → Done; within a
+   * lane states are sorted alphabetically for stability.
+   */
+  const availableStates = useMemo(() => {
+    const present = new Set<string>()
+    for (const { pbi, tasks } of rows) {
+      present.add(getState(pbi))
+      for (const t of tasks) present.add(getState(t))
+    }
+    const laneOrder: Record<string, number> = {
+      todo: 0,
+      inProgress: 1,
+      done: 2
+    }
+    return [...present].sort((a, b) => {
+      const la = laneOrder[laneOf(a)] ?? 99
+      const lb = laneOrder[laneOf(b)] ?? 99
+      if (la !== lb) return la - lb
+      return a.localeCompare(b)
+    })
+  }, [rows])
+
+  const stateFilterActive = selectedStates.length > 0
+  const stateSet = useMemo(() => new Set(selectedStates), [selectedStates])
+
+  /**
+   * Pre-tokenized text filter. Min length 1 (vs. 2 for ADO search) — the
+   * sprint dataset is already small enough that a one-char token won't
+   * blow up the result set, and it's nice to be able to type "1" to
+   * narrow on an id digit.
+   */
+  const textTokens = useMemo(
+    () => tokenizeForSearch(textFilter, 1),
+    [textFilter]
+  )
+  const textFilterActive = textTokens.length > 0
+
+  /**
+   * Build a single lowercased haystack for an item — id, title, type,
+   * state, assignee, and tags concatenated. Cheap to recompute and lets
+   * the matcher use a simple `indexOf` per token.
+   */
+  function buildHaystack(w: AdoWorkItem): string {
+    const tags = getTags(w).join(' ')
+    return `${w.id} ${getTitle(w)} ${getType(w)} ${getState(w)} ${getAssigneeName(w)} ${tags}`.toLowerCase()
+  }
+
+  function matchesText(pbi: AdoWorkItem, tasks: AdoWorkItem[]): boolean {
+    if (!textFilterActive) return true
+    const haystacks = [buildHaystack(pbi), ...tasks.map(buildHaystack)]
+    // A token is considered matched if it appears in *any* item haystack
+    // (the PBI itself or any task). The row is kept when every token
+    // matches somewhere — i.e. AND across tokens, OR across items.
+    return textTokens.every((tok) => {
+      const lc = tok.toLowerCase()
+      return haystacks.some((h) => h.includes(lc))
+    })
+  }
+
   const filteredRows = useMemo(() => {
-    const meKey = me
     return rows
       .map(({ pbi, tasks }) => {
-        // Task lanes are only narrowed when the user explicitly opts to
-        // include tasks in the filter — otherwise the row keeps every task
-        // visible and filtering happens purely at the PBI/Bug level.
-        const filteredTasks =
-          userFilterActive && includeTasksInFilter
-            ? tasks.filter(matchesUserFilter)
-            : tasks
+        // Task lanes are narrowed in two situations:
+        //   - "Include tasks in user filter" mode is on AND a user filter
+        //     is active → keep only tasks owned by selected users.
+        //   - A status filter is active → keep only tasks in selected
+        //     states, regardless of who owns them.
+        let filteredTasks = tasks
+        if (userFilterActive && includeTasksInFilter) {
+          filteredTasks = filteredTasks.filter(matchesUserFilter)
+        }
+        if (stateFilterActive) {
+          filteredTasks = filteredTasks.filter((t) => stateSet.has(getState(t)))
+        }
         return { pbi, tasks: filteredTasks, allTasks: tasks }
       })
       .filter(({ pbi, tasks, allTasks }) => {
         if (typeFilterActive && !typeSet.has(getType(pbi))) return false
-        if (onlyMine && meKey) {
-          const ownerMine = identityKey(getAssignee(pbi)) === meKey
-          if (!ownerMine) {
-            if (!includeTasksInFilter) return false
-            // Tasks-included mode: keep the row if any task is mine.
-            const anyTaskMine = allTasks.some(
-              (t) => identityKey(getAssignee(t)) === meKey
-            )
-            if (!anyTaskMine) return false
-          }
-        }
         if (userFilterActive) {
           const pbiMatches = matchesUserFilter(pbi)
           if (includeTasksInFilter) {
@@ -407,20 +500,39 @@ export default function SprintPage(): JSX.Element {
             return false
           }
         }
-        if (hideDone) {
-          if (
-            isDoneState(getState(pbi)) &&
-            allTasks.every((t) => isDoneState(getState(t)))
-          ) {
-            return false
+        // State filter behaviour:
+        //   - A row with children: keep it if at least one task survived
+        //     the state filter (i.e. `tasks.length > 0` after filtering).
+        //   - A row with no children (standalone PBI/Bug): keep it only
+        //     if the row's *own* state matches — otherwise the row strip
+        //     contains nothing relevant to the chosen filter.
+        if (stateFilterActive) {
+          if (allTasks.length === 0) {
+            if (!stateSet.has(getState(pbi))) return false
+          } else {
+            if (tasks.length === 0) return false
           }
+        }
+        // Text filter runs against the *unfiltered* task list so the
+        // user's search isn't accidentally hidden by the user/state
+        // filters above. If the row contains a match anywhere, keep it.
+        if (textFilterActive && !matchesText(pbi, allTasks)) {
+          return false
         }
         return true
       })
       .map(({ pbi, tasks }) => ({ pbi, tasks }))
-    // matchesUserFilter / identityKey close over userKeySet which is a dep.
+    // matchesUserFilter / matchesText close over state that is already
+    // in the deps list (userKeySet, textTokens, etc).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, onlyMine, hideDone, me, userKeySet, typeSet, includeTasksInFilter])
+  }, [
+    rows,
+    userKeySet,
+    typeSet,
+    includeTasksInFilter,
+    stateSet,
+    textTokens
+  ])
 
   /* ---------- drag-and-drop (Kanban only) ---------- */
 
@@ -484,30 +596,12 @@ export default function SprintPage(): JSX.Element {
         <Alert severity="info" action={
           <Chip
             size="small"
-            label="Open Workspace"
-            onClick={() => navigate('/workspace')}
+            label="Open Home"
+            onClick={() => navigate('/home')}
             color="primary"
           />
         }>
-          Pick a project in Workspace to load the sprint view.
-        </Alert>
-      </Box>
-    )
-  }
-
-  if (!teamId) {
-    return (
-      <Box sx={{ p: 3 }}>
-        <Alert severity="info" action={
-          <Chip
-            size="small"
-            label="Open Workspace"
-            onClick={() => navigate('/workspace')}
-            color="primary"
-          />
-        }>
-          The sprint view needs a team to know which iterations to show.
-          Select one in Workspace.
+          Pick a project on Home to load the sprint view.
         </Alert>
       </Box>
     )
@@ -528,10 +622,50 @@ export default function SprintPage(): JSX.Element {
         alignItems="center"
         sx={{
           p: 1.5,
-          borderBottom: '1px solid rgba(0,0,0,0.08)',
+          borderBottom: '1px solid',
+          borderColor: 'divider',
           rowGap: 1
         }}
       >
+        {/*
+         * Team picker — lives here (not on the home page) because team
+         * scope is what makes iterations meaningful: ADO returns the
+         * iteration list per-team, and the Sprint WIQL needs the
+         * team-relative iteration path. Switching team also resets the
+         * iteration so we don't fall back on a path that belongs to a
+         * different team.
+         */}
+        <Autocomplete
+          size="small"
+          sx={{
+            flex: '1 1 220px',
+            minWidth: 180,
+            maxWidth: 320
+          }}
+          options={teamsQ.data ?? []}
+          getOptionLabel={(opt) => opt.name}
+          isOptionEqualToValue={(a, b) => a.id === b.id}
+          value={teamsQ.data?.find((t) => t.id === teamId) ?? null}
+          onChange={(_e, value) => {
+            dispatch(
+              setTeam(value ? { id: value.id, name: value.name } : null)
+            )
+            // Clear the iteration so the default-pick effect re-runs and
+            // selects the new team's current iteration on next load.
+            setIterationPath(null)
+          }}
+          loading={teamsQ.isLoading}
+          renderInput={(params) => (
+            <TextField
+              {...params}
+              label={teamsQ.isLoading ? 'Loading teams…' : 'Team (required)'}
+              size="small"
+              required
+              error={!teamId && !teamsQ.isLoading}
+            />
+          )}
+        />
+
         <Autocomplete
           size="small"
           sx={{
@@ -553,6 +687,7 @@ export default function SprintPage(): JSX.Element {
             sortedIterations.find((it) => it.path === iterationPath) ?? null
           }
           onChange={(_e, value) => setIterationPath(value?.path ?? null)}
+          disabled={!teamId}
           renderOption={(liProps, option) => {
             const tf = option.attributes?.timeFrame
             const tone =
@@ -580,13 +715,62 @@ export default function SprintPage(): JSX.Element {
           }}
           renderInput={(params) => <TextField {...params} label="Iteration" />}
         />
+        <TextField
+          size="small"
+          // The text filter sits next to the iteration picker (the other
+          // primary control) so the user reaches for it first when
+          // hunting for a specific PBI/task in a busy sprint.
+          sx={{ flex: '1 1 220px', minWidth: 180, maxWidth: 320 }}
+          placeholder="Find PBI or task… (id, title, tag, person)"
+          value={textFilter}
+          onChange={(e) => setTextFilter(e.target.value)}
+          slotProps={{
+            input: {
+              startAdornment: (
+                <InputAdornment position="start">
+                  <SearchIcon fontSize="small" />
+                </InputAdornment>
+              ),
+              endAdornment: textFilter ? (
+                <InputAdornment position="end">
+                  <Tooltip title="Clear filter">
+                    <IconButton
+                      size="small"
+                      edge="end"
+                      onClick={() => setTextFilter('')}
+                    >
+                      <ClearIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </InputAdornment>
+              ) : null
+            }
+          }}
+        />
         <Autocomplete<UserOption, true>
           multiple
           size="small"
           // Don't `flex-grow` the user filter — it would steal space from
           // every other control and force them to wrap before they need to.
           // It still shrinks when the row is tight (down to ~180px).
-          sx={{ flex: '0 1 260px', minWidth: 180, maxWidth: 360 }}
+          //
+          // Tighten the inner padding and chip margins so the field stays
+          // the same height as a sibling small TextField even after a
+          // chip is selected. Without this MUI's default chip (24px) +
+          // multi-input padding pushes the field ~10px taller than its
+          // neighbours, which made the toolbar look misaligned.
+          sx={{
+            flex: '0 1 260px',
+            minWidth: 180,
+            maxWidth: 360,
+            '& .MuiAutocomplete-inputRoot': {
+              py: '3px !important',
+              gap: 0.25
+            },
+            '& .MuiAutocomplete-tag': {
+              my: 0
+            }
+          }}
           options={[
             { key: '__unassigned__', label: 'Unassigned', isUnassigned: true },
             ...availableUsers.map<UserOption>((u) => ({
@@ -631,24 +815,29 @@ export default function SprintPage(): JSX.Element {
                   size="small"
                   label={opt.label}
                   {...tagProps}
+                  // Constrain the chip so the whole field stays the same
+                  // height as a sibling small TextField. Default small
+                  // chip is 24px which, combined with the autocomplete
+                  // input padding, pushes the field above 40px.
+                  sx={{
+                    height: 22,
+                    '& .MuiChip-label': { px: 0.75, fontSize: 12 },
+                    '& .MuiChip-deleteIcon': { fontSize: 14 }
+                  }}
                 />
               )
             })
           }
           renderInput={(params) => (
-            <TextField {...params} label="Filter by user" placeholder="Add user…" />
-          )}
-        />
-        <FormControlLabel
-          control={
-            <Switch
-              size="small"
-              checked={onlyMine}
-              disabled={!me}
-              onChange={(e) => setOnlyMine(e.target.checked)}
+            <TextField
+              {...params}
+              label="Filter by user"
+              // Suppress the placeholder once chips are present, otherwise
+              // MUI keeps a second input line reserved for it under the
+              // chips and the field renders almost twice as tall.
+              placeholder={selectedUsers.length === 0 ? 'Add user…' : ''}
             />
-          }
-          label="My rows only"
+          )}
         />
         <Tooltip
           title={
@@ -668,16 +857,6 @@ export default function SprintPage(): JSX.Element {
             label="Include tasks"
           />
         </Tooltip>
-        <FormControlLabel
-          control={
-            <Switch
-              size="small"
-              checked={hideDone}
-              onChange={(e) => setHideDone(e.target.checked)}
-            />
-          }
-          label="Hide fully done"
-        />
         {availableTypes.length > 1 && (
           <Stack
             direction="row"
@@ -741,7 +920,79 @@ export default function SprintPage(): JSX.Element {
                     cursor: 'pointer',
                     bgcolor: 'transparent',
                     color: 'text.secondary',
-                    border: '1px dashed rgba(0,0,0,0.3)',
+                    border: '1px dashed',
+                    borderColor: 'divider',
+                    '& .MuiChip-label': { px: 0.75, fontSize: 10 }
+                  }}
+                />
+              </Tooltip>
+            )}
+          </Stack>
+        )}
+        {/* Show the status filter strip whenever it's relevant: in Kanban
+            mode (its primary use), or whenever a status filter is active
+            (so it can't be set in Kanban and silently keep filtering Matrix
+            view rows after switching). */}
+        {(viewMode === 'kanban' || stateFilterActive) && availableStates.length > 1 && (
+          <Stack
+            direction="row"
+            useFlexGap
+            flexWrap="wrap"
+            spacing={0.5}
+            alignItems="center"
+            sx={{ rowGap: 0.5 }}
+          >
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ mr: 0.25 }}
+            >
+              Status:
+            </Typography>
+            {availableStates.map((state) => {
+              const active = !stateFilterActive || stateSet.has(state)
+              const color = colorForState(state)
+              return (
+                <Chip
+                  key={state}
+                  size="small"
+                  label={state}
+                  onClick={() =>
+                    setSelectedStates((prev) =>
+                      prev.includes(state)
+                        ? prev.filter((s) => s !== state)
+                        : [...prev, state]
+                    )
+                  }
+                  sx={{
+                    height: 22,
+                    cursor: 'pointer',
+                    bgcolor: active ? color : 'transparent',
+                    color: active ? readableTextColor(color) : color,
+                    border: `1px solid ${color}`,
+                    fontWeight: 600,
+                    '& .MuiChip-label': {
+                      px: 0.75,
+                      fontSize: 11
+                    },
+                    '&:hover': { opacity: 0.85 }
+                  }}
+                />
+              )
+            })}
+            {stateFilterActive && (
+              <Tooltip title="Clear status filter">
+                <Chip
+                  size="small"
+                  label="all"
+                  onClick={() => setSelectedStates([])}
+                  sx={{
+                    height: 22,
+                    cursor: 'pointer',
+                    bgcolor: 'transparent',
+                    color: 'text.secondary',
+                    border: '1px dashed',
+                    borderColor: 'divider',
                     '& .MuiChip-label': { px: 0.75, fontSize: 10 }
                   }}
                 />
@@ -804,6 +1055,21 @@ export default function SprintPage(): JSX.Element {
         {(wiqlQ.isFetching || batchQ.isFetching) && (
           <LinearProgress sx={{ position: 'sticky', top: 0, zIndex: 5 }} />
         )}
+        {!teamId && (
+          <Box sx={{ p: 3 }}>
+            <Alert severity="info">
+              <AlertTitle>Pick a team</AlertTitle>
+              Iterations are scoped per ADO team — choose one above to
+              load the sprint.{' '}
+              {teamsQ.data && teamsQ.data.length === 0 && (
+                <span>
+                  This project has no teams visible to your PAT. Ask an
+                  admin or pick a different project.
+                </span>
+              )}
+            </Alert>
+          </Box>
+        )}
         {wiqlQ.error != null && (
           <Box sx={{ p: 2 }}>
             <Alert severity="error">
@@ -817,7 +1083,7 @@ export default function SprintPage(): JSX.Element {
                     mt: 1,
                     p: 1,
                     fontSize: 11,
-                    bgcolor: 'rgba(0,0,0,0.04)',
+                    bgcolor: 'action.hover',
                     borderRadius: 1,
                     overflow: 'auto',
                     whiteSpace: 'pre-wrap',
@@ -830,13 +1096,44 @@ export default function SprintPage(): JSX.Element {
             </Alert>
           </Box>
         )}
-        {!wiqlQ.isLoading && !batchQ.isLoading && rows.length === 0 && (
-          <Box sx={{ p: 4, textAlign: 'center' }}>
-            <Typography color="text.secondary">
-              No backlog rows (PBI / User Story / Bug / Defect) found in this iteration.
-            </Typography>
-          </Box>
-        )}
+        {!!teamId &&
+          !wiqlQ.isLoading &&
+          !batchQ.isLoading &&
+          rows.length === 0 && (
+            <Box sx={{ p: 4, textAlign: 'center' }}>
+              <Typography color="text.secondary">
+                No backlog rows (PBI / User Story / Bug / Defect) found in this
+                iteration.
+              </Typography>
+            </Box>
+          )}
+        {!wiqlQ.isLoading &&
+          !batchQ.isLoading &&
+          rows.length > 0 &&
+          filteredRows.length === 0 && (
+            <Box sx={{ p: 4, textAlign: 'center' }}>
+              <Typography color="text.secondary" gutterBottom>
+                No rows match the current filters.
+              </Typography>
+              {(textFilterActive ||
+                stateFilterActive ||
+                typeFilterActive ||
+                userFilterActive) && (
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={() => {
+                    setTextFilter('')
+                    setSelectedStates([])
+                    setSelectedTypes([])
+                    setSelectedUsers([])
+                  }}
+                >
+                  Clear all filters
+                </Button>
+              )}
+            </Box>
+          )}
         {filteredRows.length > 0 && viewMode === 'matrix' && (
           <SprintMatrix
             rows={filteredRows}
@@ -909,10 +1206,13 @@ function SprintMatrix({
               top: 0,
               left: 0,
               zIndex: 4,
-              background: 'background.paper',
-              bgcolor: '#FAFAFA',
-              borderBottom: '1px solid rgba(0,0,0,0.12)',
-              borderRight: '1px solid rgba(0,0,0,0.08)',
+              // The matrix header sits on top of the scrolling table body,
+              // so it needs a solid surface colour. Use background.paper so
+              // it inherits both light and dark theme tokens cleanly.
+              bgcolor: 'background.paper',
+              borderBottom: '1px solid',
+              borderRight: '1px solid',
+              borderColor: 'divider',
               textAlign: 'left',
               px: 1.5,
               py: 1,
@@ -930,8 +1230,9 @@ function SprintMatrix({
                 position: 'sticky',
                 top: 0,
                 zIndex: 3,
-                bgcolor: '#FAFAFA',
-                borderBottom: '1px solid rgba(0,0,0,0.12)',
+                bgcolor: 'background.paper',
+                borderBottom: '1px solid',
+                borderColor: 'divider',
                 px: 1,
                 py: 1,
                 textAlign: 'center',
@@ -965,8 +1266,9 @@ function SprintMatrix({
               position: 'sticky',
               top: 0,
               zIndex: 3,
-              bgcolor: '#FAFAFA',
-              borderBottom: '1px solid rgba(0,0,0,0.12)',
+              bgcolor: 'background.paper',
+              borderBottom: '1px solid',
+              borderColor: 'divider',
               px: 1.5,
               py: 1,
               textAlign: 'left',
@@ -1029,8 +1331,9 @@ function SprintRow({
           left: 0,
           zIndex: 2,
           bgcolor: 'background.paper',
-          borderBottom: '1px solid rgba(0,0,0,0.06)',
-          borderRight: '1px solid rgba(0,0,0,0.08)',
+          borderBottom: '1px solid',
+          borderRight: '1px solid',
+          borderColor: 'divider',
           px: 1.5,
           py: 1,
           verticalAlign: 'top',
@@ -1072,7 +1375,12 @@ function SprintRow({
                   height: 8,
                   borderRadius: '50%',
                   bgcolor: colorForState(pbiState),
-                  border: '1px solid rgba(0,0,0,0.1)'
+                  border: (theme) =>
+                    `1px solid ${
+                      theme.palette.mode === 'dark'
+                        ? 'rgba(255,255,255,0.18)'
+                        : 'rgba(0,0,0,0.1)'
+                    }`
                 }}
               />
               <Typography variant="caption" color="text.secondary">
@@ -1108,8 +1416,14 @@ function SprintRow({
                   width: 22,
                   height: 22,
                   borderRadius: '50%',
-                  bgcolor: ownerName === 'Unassigned' ? '#E0E3E7' : '#1A73E8',
-                  color: ownerName === 'Unassigned' ? '#5F6368' : '#FFFFFF',
+                  bgcolor: (theme) =>
+                    ownerName === 'Unassigned'
+                      ? theme.palette.action.disabledBackground
+                      : '#1A73E8',
+                  color: (theme) =>
+                    ownerName === 'Unassigned'
+                      ? theme.palette.text.secondary
+                      : '#FFFFFF',
                   display: 'inline-flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -1137,7 +1451,8 @@ function SprintRow({
       <Box
         component="td"
         sx={{
-          borderBottom: '1px solid rgba(0,0,0,0.06)',
+          borderBottom: '1px solid',
+          borderColor: 'divider',
           px: 1.5,
           py: 1,
           verticalAlign: 'top',
@@ -1158,7 +1473,7 @@ function SprintRow({
             sx={{
               height: 6,
               borderRadius: 3,
-              bgcolor: 'rgba(0,0,0,0.08)',
+              bgcolor: 'action.hover',
               '& .MuiLinearProgress-bar': {
                 bgcolor: pct === 100 ? '#339933' : '#1A73E8'
               }
@@ -1183,8 +1498,9 @@ function TaskCell({
     <Box
       component="td"
       sx={{
-        borderBottom: '1px solid rgba(0,0,0,0.06)',
-        borderLeft: '1px solid rgba(0,0,0,0.04)',
+        borderBottom: '1px solid',
+        borderLeft: '1px solid',
+        borderColor: 'divider',
         px: 0.75,
         py: 0.75,
         verticalAlign: 'top',
@@ -1275,9 +1591,10 @@ function SprintKanban({
               top: 0,
               left: 0,
               zIndex: 4,
-              bgcolor: '#FAFAFA',
-              borderBottom: '1px solid rgba(0,0,0,0.12)',
-              borderRight: '1px solid rgba(0,0,0,0.08)',
+              bgcolor: 'background.paper',
+              borderBottom: '1px solid',
+              borderRight: '1px solid',
+              borderColor: 'divider',
               textAlign: 'left',
               px: 1.5,
               py: 1,
@@ -1295,9 +1612,13 @@ function SprintKanban({
                 position: 'sticky',
                 top: 0,
                 zIndex: 3,
-                bgcolor: '#FAFAFA',
+                bgcolor: 'background.paper',
+                // Lane tone underlines stay vivid in dark mode (the hex
+                // tones in KANBAN_LANES are saturated enough to read on
+                // both surfaces); only the right divider needs a token.
                 borderBottom: `2px solid ${lane.tone}`,
-                borderRight: '1px solid rgba(0,0,0,0.06)',
+                borderRight: '1px solid',
+                borderColor: 'divider',
                 px: 1.5,
                 py: 1,
                 textAlign: 'left',
@@ -1311,7 +1632,12 @@ function SprintKanban({
                     height: 8,
                     borderRadius: '50%',
                     bgcolor: lane.tone,
-                    border: '1px solid rgba(0,0,0,0.1)'
+                    border: (theme) =>
+                      `1px solid ${
+                        theme.palette.mode === 'dark'
+                          ? 'rgba(255,255,255,0.18)'
+                          : 'rgba(0,0,0,0.1)'
+                      }`
                   }}
                 />
                 <Typography
@@ -1399,8 +1725,9 @@ function KanbanSwimRow({
           left: 0,
           zIndex: 2,
           bgcolor: 'background.paper',
-          borderBottom: '1px solid rgba(0,0,0,0.06)',
-          borderRight: '1px solid rgba(0,0,0,0.08)',
+          borderBottom: '1px solid',
+          borderRight: '1px solid',
+          borderColor: 'divider',
           px: 1.5,
           py: 1,
           verticalAlign: 'top',
@@ -1447,7 +1774,12 @@ function KanbanSwimRow({
                   height: 8,
                   borderRadius: '50%',
                   bgcolor: colorForState(pbiState),
-                  border: '1px solid rgba(0,0,0,0.1)'
+                  border: (theme) =>
+                    `1px solid ${
+                      theme.palette.mode === 'dark'
+                        ? 'rgba(255,255,255,0.18)'
+                        : 'rgba(0,0,0,0.1)'
+                    }`
                 }}
               />
               <Typography variant="caption" color="text.secondary">
@@ -1489,10 +1821,14 @@ function KanbanSwimRow({
                   width: 22,
                   height: 22,
                   borderRadius: '50%',
-                  bgcolor:
-                    ownerName === 'Unassigned' ? '#E0E3E7' : '#1A73E8',
-                  color:
-                    ownerName === 'Unassigned' ? '#5F6368' : '#FFFFFF',
+                  bgcolor: (theme) =>
+                    ownerName === 'Unassigned'
+                      ? theme.palette.action.disabledBackground
+                      : '#1A73E8',
+                  color: (theme) =>
+                    ownerName === 'Unassigned'
+                      ? theme.palette.text.secondary
+                      : '#FFFFFF',
                   display: 'inline-flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -1523,7 +1859,7 @@ function KanbanSwimRow({
                 sx={{
                   height: 4,
                   borderRadius: 2,
-                  bgcolor: 'rgba(0,0,0,0.08)',
+                  bgcolor: 'action.hover',
                   overflow: 'hidden'
                 }}
               >
@@ -1635,7 +1971,7 @@ function KanbanSwimCell({
     hover === 'valid'
       ? `${lane.tone}1A` // ~10% alpha tint of the lane colour
       : hover === 'invalid'
-        ? 'rgba(217,48,37,0.08)'
+        ? 'rgba(217,48,37,0.12)'
         : 'background.paper'
   const outline =
     hover === 'valid'
@@ -1653,8 +1989,9 @@ function KanbanSwimCell({
       onDrop={handleDrop}
       sx={{
         verticalAlign: 'top',
-        borderBottom: '1px solid rgba(0,0,0,0.06)',
-        borderRight: '1px solid rgba(0,0,0,0.06)',
+        borderBottom: '1px solid',
+        borderRight: '1px solid',
+        borderColor: 'divider',
         px: 0.75,
         py: 0.75,
         bgcolor: tint,
@@ -1756,12 +2093,22 @@ function KanbanSwimCard({
         bgcolor: 'background.paper',
         borderRadius: 1,
         borderLeft: `3px solid ${accent}`,
-        boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+        // Cards rely on shadow + the coloured left border for depth; in
+        // dark mode a black drop-shadow disappears against the dark
+        // surface, so we lean on a slightly heavier shadow that still
+        // reads on top of #161A22.
+        boxShadow: (theme) =>
+          theme.palette.mode === 'dark'
+            ? '0 1px 2px rgba(0,0,0,0.6)'
+            : '0 1px 2px rgba(0,0,0,0.05)',
         p: 0.75,
         userSelect: 'none', // keeps drag from accidentally selecting text
         transition: 'box-shadow 120ms, transform 120ms, opacity 120ms',
         '&:hover': {
-          boxShadow: '0 2px 6px rgba(0,0,0,0.12)',
+          boxShadow: (theme) =>
+            theme.palette.mode === 'dark'
+              ? '0 2px 8px rgba(0,0,0,0.7)'
+              : '0 2px 6px rgba(0,0,0,0.12)',
           transform: 'translateY(-1px)'
         },
         opacity: dragging ? 0.4 : done ? 0.75 : 1
@@ -1835,9 +2182,14 @@ function KanbanSwimCard({
               width: 18,
               height: 18,
               borderRadius: '50%',
-              bgcolor:
-                assigneeName === 'Unassigned' ? '#E0E3E7' : '#1A73E8',
-              color: assigneeName === 'Unassigned' ? '#5F6368' : '#FFFFFF',
+              bgcolor: (theme) =>
+                assigneeName === 'Unassigned'
+                  ? theme.palette.action.disabledBackground
+                  : '#1A73E8',
+              color: (theme) =>
+                assigneeName === 'Unassigned'
+                  ? theme.palette.text.secondary
+                  : '#FFFFFF',
               display: 'inline-flex',
               alignItems: 'center',
               justifyContent: 'center',

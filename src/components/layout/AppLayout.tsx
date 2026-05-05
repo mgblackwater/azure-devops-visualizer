@@ -18,13 +18,22 @@ import LogoutIcon from '@mui/icons-material/Logout'
 import RefreshIcon from '@mui/icons-material/Refresh'
 import InsightsIcon from '@mui/icons-material/Insights'
 import DirectionsRunIcon from '@mui/icons-material/DirectionsRun'
-import TuneIcon from '@mui/icons-material/Tune'
+import HomeIcon from '@mui/icons-material/Home'
+import MenuBookIcon from '@mui/icons-material/MenuBook'
+import LightModeIcon from '@mui/icons-material/LightMode'
+import DarkModeIcon from '@mui/icons-material/DarkMode'
+import SettingsBrightnessIcon from '@mui/icons-material/SettingsBrightness'
 import styled from 'styled-components'
 import {
   useClearConnectionMutation,
   useGetConnectionQuery
 } from '@/store/api/adoApi'
-import { useAppSelector } from '@/store'
+import { useAppDispatch, useAppSelector } from '@/store'
+import {
+  selectThemeMode,
+  setThemeMode,
+  type ThemeMode
+} from '@/store/preferencesSlice'
 import WorkItemDrawer from '@/components/workItem/WorkItemDrawer'
 import WorkItemSearchBox from '@/components/layout/WorkItemSearchBox'
 
@@ -37,7 +46,7 @@ const Shell = styled.div`
 `
 
 const Sidebar = styled.aside`
-  border-right: 1px solid rgba(0, 0, 0, 0.08);
+  border-right: 1px solid ${({ theme }) => theme?.palette?.divider ?? 'rgba(0, 0, 0, 0.08)'};
   background: ${({ theme }) => theme?.palette?.background?.paper ?? '#ffffff'};
   display: flex;
   flex-direction: column;
@@ -64,24 +73,48 @@ interface NavEntry {
 }
 
 const NAV: NavEntry[] = [
-  { to: '/workspace', label: 'Workspace', icon: <TuneIcon /> },
+  { to: '/home', label: 'Home', icon: <HomeIcon /> },
   { to: '/visualize', label: 'Visualize', icon: <InsightsIcon /> },
-  { to: '/sprint', label: 'Sprint', icon: <DirectionsRunIcon /> }
+  { to: '/sprint', label: 'Sprint', icon: <DirectionsRunIcon /> },
+  { to: '/wiki', label: 'Wiki', icon: <MenuBookIcon /> }
 ]
+
+const THEME_MODE_LABEL: Record<ThemeMode, string> = {
+  light: 'Light',
+  dark: 'Dark',
+  system: 'System'
+}
+
+/** Cycle order surfaces all three options without needing a menu. */
+const NEXT_THEME_MODE: Record<ThemeMode, ThemeMode> = {
+  light: 'dark',
+  dark: 'system',
+  system: 'light'
+}
+
+function themeModeIcon(mode: ThemeMode): JSX.Element {
+  if (mode === 'light') return <LightModeIcon fontSize="small" />
+  if (mode === 'dark') return <DarkModeIcon fontSize="small" />
+  return <SettingsBrightnessIcon fontSize="small" />
+}
 
 export default function AppLayout(): JSX.Element {
   const { data: connection } = useGetConnectionQuery()
   const [clearConnection] = useClearConnectionMutation()
   const navigate = useNavigate()
   const location = useLocation()
+  const dispatch = useAppDispatch()
   const workspace = useAppSelector((s) => s.workspace)
+  const themeMode = useAppSelector(selectThemeMode)
+  const nextThemeMode = NEXT_THEME_MODE[themeMode]
 
   // Sprint reads only project + team — the workspace query source is
   // irrelevant there, so don't show the source chip or the "pick a query"
-  // hint on that route. Workspace page has its own pickers.
+  // hint on that route. Home and Wiki have their own pickers / scope.
   const showQueryContext =
     !location.pathname.startsWith('/sprint') &&
-    !location.pathname.startsWith('/workspace')
+    !location.pathname.startsWith('/home') &&
+    !location.pathname.startsWith('/wiki')
 
   const orgLabel = useMemo(() => {
     if (!connection?.organizationUrl) return ''
@@ -209,11 +242,21 @@ export default function AppLayout(): JSX.Element {
               )}
               {showQueryContext && !workspace.source && (
                 <Typography variant="body2" color="text.secondary">
-                  Pick a query in the Workspace tab to start visualizing.
+                  Pick a query in Home to start visualizing.
                 </Typography>
               )}
             </Box>
             <WorkItemSearchBox />
+            <Tooltip
+              title={`Theme: ${THEME_MODE_LABEL[themeMode]} · Click for ${THEME_MODE_LABEL[nextThemeMode]}`}
+            >
+              <IconButton
+                onClick={() => dispatch(setThemeMode(nextThemeMode))}
+                aria-label={`Theme: ${THEME_MODE_LABEL[themeMode]}. Click to switch to ${THEME_MODE_LABEL[nextThemeMode]}.`}
+              >
+                {themeModeIcon(themeMode)}
+              </IconButton>
+            </Tooltip>
             <Tooltip title="Refresh data">
               <IconButton onClick={() => window.location.reload()}>
                 <RefreshIcon />

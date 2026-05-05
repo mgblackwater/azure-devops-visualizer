@@ -26,10 +26,10 @@ export default function EmptyState({
         <Stack alignItems="center" spacing={2}>
           <Typography variant="h6">No data source selected</Typography>
           <Typography variant="body2" color="text.secondary">
-            Pick a project and a query in the Workspace tab.
+            Pick a project and a query on Home.
           </Typography>
-          <Button variant="contained" onClick={() => navigate('/workspace')}>
-            Open Workspace
+          <Button variant="contained" onClick={() => navigate('/home')}>
+            Open Home
           </Button>
         </Stack>
       </Box>

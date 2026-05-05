@@ -1,4 +1,5 @@
 import { memo } from 'react'
+import { useTheme } from '@mui/material'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { colorForState, colorForType, readableTextColor } from '@/utils/adoColors'
 
@@ -54,25 +55,56 @@ function priorityColor(priority?: number | null): string {
 
 function WorkItemNodeImpl(props: NodeProps): JSX.Element {
   const data = props.data as unknown as WorkItemNodeData
+  const muiTheme = useTheme()
+  const isDark = muiTheme.palette.mode === 'dark'
+
   const typeColor = colorForType(data.type)
   const stateColor = colorForState(data.state)
   const accentFg = readableTextColor(typeColor)
   const initial = TYPE_INITIAL[data.type] ?? data.type.slice(0, 1).toUpperCase()
 
+  // The work-item card is rendered with inline styles so it lives outside
+  // the MUI sx system; resolve every surface, border, and text colour from
+  // the active theme so the node looks at home on both light and dark
+  // ReactFlow panes.
+  const surface = muiTheme.palette.background.paper
+  const subtleBorder = isDark ? 'rgba(255,255,255,0.12)' : '#E0E3E7'
+  const titleColor = muiTheme.palette.text.primary
+  const metaColor = muiTheme.palette.text.secondary
+  const childChipBg = data.collapsed
+    ? isDark
+      ? '#5C4A1F'
+      : '#FFE082'
+    : isDark
+      ? 'rgba(255,255,255,0.10)'
+      : '#E8EAED'
+  const childChipFg = data.collapsed
+    ? isDark
+      ? '#FFE082'
+      : '#3C4043'
+    : muiTheme.palette.text.primary
+  const stateRingBorder = isDark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.08)'
+  const avatarUnassignedBg = isDark ? 'rgba(255,255,255,0.12)' : '#E0E3E7'
+  const avatarUnassignedFg = metaColor
+  const focusShadow = isDark
+    ? `0 0 0 3px ${typeColor}55, 0 4px 14px rgba(0,0,0,0.6)`
+    : `0 0 0 3px ${typeColor}33, 0 4px 12px rgba(0,0,0,0.12)`
+  const restingShadow = isDark
+    ? '0 1px 2px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.5)'
+    : '0 1px 2px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.06)'
+
   return (
     <div
       style={{
         position: 'relative',
-        background: '#FFFFFF',
-        border: data.isFocused ? `2px solid ${typeColor}` : '1px solid #E0E3E7',
+        background: surface,
+        border: data.isFocused ? `2px solid ${typeColor}` : `1px solid ${subtleBorder}`,
         borderLeft: `4px solid ${typeColor}`,
         borderRadius: 8,
         width: 240,
         fontFamily: 'inherit',
         fontSize: 12,
-        boxShadow: data.isFocused
-          ? `0 0 0 3px ${typeColor}33, 0 4px 12px rgba(0,0,0,0.12)`
-          : '0 1px 2px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.06)',
+        boxShadow: data.isFocused ? focusShadow : restingShadow,
         overflow: 'hidden',
         userSelect: 'none'
       }}
@@ -110,12 +142,12 @@ function WorkItemNodeImpl(props: NodeProps): JSX.Element {
         >
           {initial}
         </span>
-        <span style={{ color: '#5F6368', fontWeight: 600, fontSize: 11 }}>
+        <span style={{ color: metaColor, fontWeight: 600, fontSize: 11 }}>
           #{data.id}
         </span>
         <span
           style={{
-            color: '#5F6368',
+            color: metaColor,
             fontSize: 11,
             textTransform: 'uppercase',
             letterSpacing: 0.4,
@@ -133,8 +165,8 @@ function WorkItemNodeImpl(props: NodeProps): JSX.Element {
               data.collapsed ? ' (collapsed)' : ''
             }`}
             style={{
-              background: data.collapsed ? '#FFE082' : '#E8EAED',
-              color: '#3C4043',
+              background: childChipBg,
+              color: childChipFg,
               fontSize: 10,
               fontWeight: 700,
               padding: '0 5px',
@@ -153,7 +185,7 @@ function WorkItemNodeImpl(props: NodeProps): JSX.Element {
         style={{
           padding: '4px 8px 8px 8px',
           fontWeight: 600,
-          color: '#202124',
+          color: titleColor,
           lineHeight: 1.3,
           display: '-webkit-box',
           WebkitLineClamp: 2,
@@ -170,7 +202,7 @@ function WorkItemNodeImpl(props: NodeProps): JSX.Element {
           alignItems: 'center',
           gap: 6,
           padding: '0 8px 8px 8px',
-          color: '#5F6368'
+          color: metaColor
         }}
       >
         <span
@@ -191,7 +223,7 @@ function WorkItemNodeImpl(props: NodeProps): JSX.Element {
               height: 8,
               borderRadius: '50%',
               background: stateColor,
-              border: '1px solid rgba(0,0,0,0.08)'
+              border: `1px solid ${stateRingBorder}`
             }}
           />
           {data.state}
@@ -221,8 +253,8 @@ function WorkItemNodeImpl(props: NodeProps): JSX.Element {
             width: 22,
             height: 22,
             borderRadius: '50%',
-            background: data.assignee ? '#1A73E8' : '#E0E3E7',
-            color: data.assignee ? 'white' : '#5F6368',
+            background: data.assignee ? '#1A73E8' : avatarUnassignedBg,
+            color: data.assignee ? 'white' : avatarUnassignedFg,
             fontSize: 10,
             fontWeight: 700
           }}

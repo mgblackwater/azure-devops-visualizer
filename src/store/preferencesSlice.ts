@@ -29,15 +29,33 @@ const EMPTY_SNAPSHOT: WorkspaceSnapshot = {
   groupBy: 'iteration'
 }
 
+export type ThemeMode = 'light' | 'dark' | 'system'
+
+const VALID_THEME_MODES: readonly ThemeMode[] = ['light', 'dark', 'system']
+
 export interface PreferencesState {
   defaultProjectByOrg: Record<string, string>
   workspaceByOrg: Record<string, WorkspaceSnapshot>
+  themeMode: ThemeMode
 }
 
 const STORAGE_KEY = 'ado-viz:preferences:v1'
 
 function emptyState(): PreferencesState {
-  return { defaultProjectByOrg: {}, workspaceByOrg: {} }
+  return {
+    defaultProjectByOrg: {},
+    workspaceByOrg: {},
+    themeMode: 'system'
+  }
+}
+
+function sanitizeThemeMode(value: unknown): ThemeMode {
+  // Tolerate older payloads that predate the themeMode field, as well as
+  // anything hand-edited in devtools — fall back to 'system' instead of
+  // crashing the slice on load.
+  return typeof value === 'string' && (VALID_THEME_MODES as readonly string[]).includes(value)
+    ? (value as ThemeMode)
+    : 'system'
 }
 
 function load(): PreferencesState {
@@ -64,6 +82,7 @@ function load(): PreferencesState {
         out.workspaceByOrg[k] = sanitizeSnapshot(v as Partial<WorkspaceSnapshot>)
       }
     }
+    out.themeMode = sanitizeThemeMode(parsed.themeMode)
     return out
   } catch {
     return emptyState()
@@ -165,6 +184,10 @@ const slice = createSlice({
       if (!key) return
       delete state.workspaceByOrg[key]
       persist(state)
+    },
+    setThemeMode(state, action: PayloadAction<ThemeMode>) {
+      state.themeMode = sanitizeThemeMode(action.payload)
+      persist(state)
     }
   }
 })
@@ -189,13 +212,20 @@ export function selectWorkspaceSnapshot(
   )
 }
 
+export function selectThemeMode(state: {
+  preferences: PreferencesState
+}): ThemeMode {
+  return state.preferences.themeMode
+}
+
 export const EMPTY_WORKSPACE_SNAPSHOT = EMPTY_SNAPSHOT
 
 export const {
   setDefaultProject,
   clearDefaultProject,
   saveWorkspaceSnapshot,
-  clearWorkspaceSnapshot
+  clearWorkspaceSnapshot,
+  setThemeMode
 } = slice.actions
 
 export default slice.reducer

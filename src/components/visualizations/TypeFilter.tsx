@@ -45,10 +45,12 @@ export default function TypeFilter({ items, compact }: Props): JSX.Element | nul
               label={`${type} ${count}`}
               onClick={() => dispatch(toggleType(type))}
               icon={isHidden ? <VisibilityOffIcon style={{ fontSize: 14 }} /> : undefined}
-              sx={{
+              sx={(theme) => ({
                 bgcolor: isHidden ? 'transparent' : bg,
                 color: isHidden ? 'text.disabled' : fg,
-                border: `1px solid ${isHidden ? 'rgba(0,0,0,0.18)' : bg}`,
+                border: `1px solid ${
+                  isHidden ? theme.palette.divider : bg
+                }`,
                 fontWeight: 600,
                 opacity: isHidden ? 0.65 : 1,
                 textDecoration: isHidden ? 'line-through' : 'none',
@@ -57,7 +59,7 @@ export default function TypeFilter({ items, compact }: Props): JSX.Element | nul
                   bgcolor: isHidden ? 'action.hover' : bg,
                   filter: isHidden ? 'none' : 'brightness(1.05)'
                 }
-              }}
+              })}
             />
           </Tooltip>
         )

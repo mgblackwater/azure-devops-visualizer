@@ -6,6 +6,7 @@
  * preload bridge stays small and the contract stays in one file.
  */
 import type {
+  AdoComment,
   AdoConnectionInfo,
   AdoConnectionInput,
   AdoIteration,
@@ -14,6 +15,9 @@ import type {
   AdoSavedQuery,
   AdoTeam,
   AdoTeamMember,
+  AdoWiki,
+  AdoWikiPage,
+  AdoWikiSearchHit,
   AdoWiqlResult,
   AdoWorkItem
 } from './adoTypes'
@@ -47,6 +51,21 @@ export const IPC = {
   WorkItemsBatchGet: 'workitems.batchGet',
   WorkItemsGetWithRelations: 'workitems.getWithRelations',
   WorkItemsPatch: 'workitems.patch',
+  /**
+   * For each work item id, return a small summary (timestamp, plain-text
+   * snippet, author) of the latest comment whose text contains the
+   * supplied search term — typically the signed-in user's display name.
+   * Powers the Workspace's "Mentions me" tab so each row can show a
+   * preview *and* sort by latest mention without a second round-trip.
+   */
+  WorkItemsLatestMentions: 'workitems.latestMentions',
+
+  /**
+   * Fetch every comment / discussion entry on a single work item, newest
+   * first. Used by the right-pane drawer to surface the conversation
+   * thread alongside the description.
+   */
+  WorkItemsListComments: 'workitems.listComments',
 
   /**
    * Fetch a binary asset (typically an inline image embedded in a work-item
@@ -56,6 +75,22 @@ export const IPC = {
    * credentials to the page or running into Chromium CORS.
    */
   AttachmentFetch: 'attachments.fetch',
+
+  /** List the wikis registered against a given project. */
+  WikiList: 'wiki.list',
+  /**
+   * Recursive page tree for one wiki — content is omitted to keep the
+   * payload small; the renderer fetches body text on demand via WikiGetPage.
+   */
+  WikiPageTree: 'wiki.pageTree',
+  /** Fetch a single wiki page (with content unless explicitly excluded). */
+  WikiGetPage: 'wiki.getPage',
+  /**
+   * Server-side wiki search via ADO's Search extension. May 404 / 410 /
+   * 401 against orgs without the extension installed; the renderer
+   * detects that and falls back to client-side filtering.
+   */
+  WikiSearch: 'wiki.search',
 
   ShellOpenExternal: 'shell.openExternal'
 } as const
@@ -138,6 +173,40 @@ export interface ShellOpenExternalArgs {
   url: string
 }
 
+export interface LatestMentionsArgs {
+  projectId: string
+  ids: number[]
+  /** Substring to look for in each comment's text. Case-insensitive. */
+  searchText: string
+}
+
+export interface MentionSummary {
+  /** ISO timestamp of the matching comment. */
+  date: string
+  /**
+   * Plain-text excerpt of the matching comment (HTML stripped, whitespace
+   * collapsed, truncated). Suitable for inline preview in lists.
+   */
+  snippet: string
+  /** Display name of whoever posted the comment, when available. */
+  author?: string
+}
+
+export interface LatestMentionsResult {
+  /** Map keyed by work-item id → summary of the latest matching comment. */
+  byId: Record<number, MentionSummary | null>
+}
+
+export interface ListCommentsArgs {
+  projectId: string
+  id: number
+}
+
+export interface ListCommentsResult {
+  /** Newest-first. Empty when the item has no discussion yet. */
+  comments: AdoComment[]
+}
+
 export interface AttachmentFetchArgs {
   /** Absolute URL pointing at the configured ADO organisation host. */
   url: string
@@ -148,6 +217,39 @@ export interface AttachmentFetchResult {
   dataBase64: string
   /** Response MIME type, e.g. `image/png`. Defaults to `application/octet-stream`. */
   contentType: string
+}
+
+export interface ListWikisArgs {
+  projectId: string
+}
+
+export interface GetWikiPageTreeArgs {
+  projectId: string
+  wikiId: string
+}
+
+export interface GetWikiPageArgs {
+  projectId: string
+  wikiId: string
+  /** Page path, e.g. `/Architecture/Overview`. Should start with '/'. */
+  path: string
+  /** Default true — set false for a metadata-only page lookup. */
+  includeContent?: boolean
+}
+
+export interface SearchWikiArgs {
+  projectId: string
+  /** Free-text search term. ADO will tokenise. */
+  term: string
+  /** Page size, default 50. */
+  top?: number
+  /** Pagination offset, default 0. */
+  skip?: number
+}
+
+export interface SearchWikiResult {
+  count: number
+  results: AdoWikiSearchHit[]
 }
 
 /* ---------- channel signature map (request -> response) ---------- */
@@ -172,8 +274,21 @@ export interface IpcSignatures {
     result: AdoWorkItem
   }
   [IPC.WorkItemsPatch]: { args: PatchWorkItemArgs; result: AdoWorkItem }
+  [IPC.WorkItemsLatestMentions]: {
+    args: LatestMentionsArgs
+    result: LatestMentionsResult
+  }
+  [IPC.WorkItemsListComments]: {
+    args: ListCommentsArgs
+    result: ListCommentsResult
+  }
 
   [IPC.AttachmentFetch]: { args: AttachmentFetchArgs; result: AttachmentFetchResult }
+
+  [IPC.WikiList]: { args: ListWikisArgs; result: AdoWiki[] }
+  [IPC.WikiPageTree]: { args: GetWikiPageTreeArgs; result: AdoWikiPage }
+  [IPC.WikiGetPage]: { args: GetWikiPageArgs; result: AdoWikiPage }
+  [IPC.WikiSearch]: { args: SearchWikiArgs; result: SearchWikiResult }
 
   [IPC.ShellOpenExternal]: { args: ShellOpenExternalArgs; result: { ok: true } }
 }

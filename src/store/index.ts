@@ -5,13 +5,15 @@ import { adoApi } from './api/adoApi'
 import workspaceReducer from './workspaceSlice'
 import recentSearchesReducer from './recentSearchesSlice'
 import preferencesReducer from './preferencesSlice'
+import favoritesReducer from './favoritesSlice'
 
 export const store = configureStore({
   reducer: {
     [adoApi.reducerPath]: adoApi.reducer,
     workspace: workspaceReducer,
     recentSearches: recentSearchesReducer,
-    preferences: preferencesReducer
+    preferences: preferencesReducer,
+    favorites: favoritesReducer
   },
   middleware: (getDefault) => getDefault().concat(adoApi.middleware)
 })

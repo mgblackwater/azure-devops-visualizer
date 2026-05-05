@@ -107,7 +107,13 @@ export default function CalendarView(): JSX.Element {
         direction="row"
         spacing={1.5}
         alignItems="center"
-        sx={{ p: 1.5, borderBottom: '1px solid rgba(0,0,0,0.08)', flexWrap: 'wrap', rowGap: 1 }}
+        sx={{
+          p: 1.5,
+          borderBottom: '1px solid',
+          borderColor: 'divider',
+          flexWrap: 'wrap',
+          rowGap: 1
+        }}
       >
         <FormControl size="small" sx={{ minWidth: 160 }}>
           <InputLabel id="calendar-color">Color by</InputLabel>

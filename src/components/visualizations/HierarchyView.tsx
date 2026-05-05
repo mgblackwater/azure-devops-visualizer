@@ -21,7 +21,8 @@ import {
   Select,
   Stack,
   Tooltip,
-  Typography
+  Typography,
+  useTheme
 } from '@mui/material'
 import UnfoldMoreIcon from '@mui/icons-material/UnfoldMore'
 import UnfoldLessIcon from '@mui/icons-material/UnfoldLess'
@@ -96,6 +97,7 @@ export default function HierarchyView(): JSX.Element {
   const filtered = useMemo(() => applyTypeFilter(raw, hiddenTypes), [raw, hiddenTypes])
   const { items, links, isLoading, isFetching, error } = filtered
   const dispatch = useAppDispatch()
+  const muiTheme = useTheme()
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set())
   const [sortMode, setSortMode] = useState<SiblingSortMode>('stackRank')
 
@@ -329,7 +331,13 @@ export default function HierarchyView(): JSX.Element {
         direction="row"
         spacing={1.5}
         alignItems="center"
-        sx={{ p: 1.5, borderBottom: '1px solid rgba(0,0,0,0.08)', flexWrap: 'wrap', rowGap: 1 }}
+        sx={{
+          p: 1.5,
+          borderBottom: '1px solid',
+          borderColor: 'divider',
+          flexWrap: 'wrap',
+          rowGap: 1
+        }}
       >
         <Button
           size="small"
@@ -403,6 +411,10 @@ export default function HierarchyView(): JSX.Element {
               onNodeClick={onNodeClick}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
+              // Drives ReactFlow's own theming: pane background, controls,
+              // minimap, edge defaults. Pair with the CSS overrides so our
+              // custom node looks right too.
+              colorMode={muiTheme.palette.mode}
               fitView
               minZoom={0.1}
               // Manual rearrangement is purely cosmetic — it never changes

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
-  Autocomplete,
   Box,
   Button,
   Chip,
@@ -9,31 +8,28 @@ import {
   Drawer,
   IconButton,
   Stack,
-  Tab,
-  Tabs,
-  TextField,
   Tooltip,
   Typography
 } from '@mui/material'
 import ArrowBackIcon from '@mui/icons-material/ArrowBack'
 import CloseIcon from '@mui/icons-material/Close'
 import LaunchIcon from '@mui/icons-material/Launch'
-import CenterFocusStrongIcon from '@mui/icons-material/CenterFocusStrong'
+import AccountTreeIcon from '@mui/icons-material/AccountTree'
 import PersonOutlineIcon from '@mui/icons-material/PersonOutline'
+import OpenInFullIcon from '@mui/icons-material/OpenInFull'
+import CloseFullscreenIcon from '@mui/icons-material/CloseFullscreen'
 import { useNavigate } from 'react-router-dom'
 import {
   useBatchGetWorkItemsQuery,
   useGetConnectionQuery,
   useGetWorkItemWithRelationsQuery,
-  useListTeamMembersQuery,
-  usePatchWorkItemMutation
+  useListWorkItemCommentsQuery
 } from '@/store/api/adoApi'
 import { IPC } from '@shared/contract'
 import { useAppDispatch, useAppSelector } from '@/store'
 import { selectWorkItem, setSource } from '@/store/workspaceSlice'
 import {
   getAreaPath,
-  getAssignee,
   getAssigneeName,
   getChangedDate,
   getCreatedDate,
@@ -51,19 +47,14 @@ import {
 } from '@/utils/workItemFields'
 import { colorForState, colorForType, readableTextColor } from '@/utils/adoColors'
 import { relativeTime } from '@/utils/sanitize'
-import { buildSubtreeWiql } from '@/utils/wiql'
+import { normalizeMentionName, buildSubtreeWiql } from '@/utils/wiql'
 import RichDescription from './RichDescription'
-import type { AdoIdentity, AdoJsonPatch, AdoRelation, AdoWorkItem } from '@shared/adoTypes'
-
-const STATE_PRESETS: Record<string, string[]> = {
-  Bug: ['New', 'Active', 'Resolved', 'Closed', 'Removed'],
-  Defect: ['New', 'Active', 'Resolved', 'Closed', 'Removed'],
-  Task: ['To Do', 'In Progress', 'Done', 'Removed'],
-  'User Story': ['New', 'Active', 'Resolved', 'Closed', 'Removed'],
-  'Product Backlog Item': ['New', 'Approved', 'Committed', 'Done', 'Removed'],
-  Feature: ['New', 'In Progress', 'Done', 'Removed'],
-  Epic: ['New', 'In Progress', 'Done', 'Removed']
-}
+import FavoriteButton from '@/components/common/FavoriteButton'
+import type {
+  AdoComment,
+  AdoRelation,
+  AdoWorkItem
+} from '@shared/adoTypes'
 
 const RELATION_GROUPS: Array<{
   id: 'parent' | 'children' | 'predecessors' | 'successors' | 'related'
@@ -102,17 +93,6 @@ const RELATION_GROUPS: Array<{
     empty: 'No related links'
   }
 ]
-
-function isoDate(value: Date | null): string {
-  if (!value) return ''
-  return value.toISOString().slice(0, 10)
-}
-
-function dateToIso(d: string | undefined): string | null {
-  if (!d) return null
-  const t = new Date(`${d}T00:00:00.000Z`)
-  return Number.isNaN(t.getTime()) ? null : t.toISOString()
-}
 
 function MetadataRow({
   label,
@@ -250,12 +230,36 @@ function RelationRow({
   )
 }
 
+/**
+ * Two-state size toggle: Compact (default narrow side pane for quick
+ * glances while keeping context behind it) ⇄ Fullscreen (whole viewport
+ * for deep reading without losing the drawer's back/forward history).
+ *
+ * Width is intentionally *not* persisted — the drawer always opens
+ * compact when the app starts. This keeps "fullscreen" feeling like an
+ * explicit, current-task gesture rather than something the user has to
+ * remember to switch back from on the next launch.
+ */
+type DrawerWidth = 'compact' | 'fullscreen'
+
+const DRAWER_WIDTH_PX: Record<DrawerWidth, string> = {
+  compact: '480px',
+  fullscreen: '100vw'
+}
+
 export default function WorkItemDrawer(): JSX.Element {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
-  const { selectedWorkItemId, projectId, teamId } = useAppSelector((s) => s.workspace)
+  const { selectedWorkItemId, projectId } = useAppSelector((s) => s.workspace)
   const open = selectedWorkItemId != null
-  const [tab, setTab] = useState<'details' | 'edit'>('details')
+  // Local state — the drawer always boots compact on a fresh app
+  // launch; the user can expand within a session and that choice
+  // persists across opening different items in the same session, but
+  // doesn't carry over to next launch.
+  const [drawerWidth, setLocalDrawerWidth] = useState<DrawerWidth>('compact')
+  const toggleWidth = useCallback(() => {
+    setLocalDrawerWidth((w) => (w === 'compact' ? 'fullscreen' : 'compact'))
+  }, [])
 
   const itemQ = useGetWorkItemWithRelationsQuery(
     selectedWorkItemId != null && projectId
@@ -264,19 +268,8 @@ export default function WorkItemDrawer(): JSX.Element {
     { skip: !open || !projectId }
   )
 
-  const membersQ = useListTeamMembersQuery(
-    projectId && teamId ? { projectId, teamId } : (undefined as never),
-    { skip: !projectId || !teamId }
-  )
-
-  const [patch, patchState] = usePatchWorkItemMutation()
-
   const item = itemQ.data
   const type = item ? getType(item) : ''
-  const stateOptions = useMemo(() => {
-    if (!type) return []
-    return STATE_PRESETS[type] ?? ['New', 'Active', 'Resolved', 'Closed', 'Removed']
-  }, [type])
 
   // Resolve all related work-item ids and grab their titles in one batch call,
   // so the relations panel renders something meaningful even for items that
@@ -324,11 +317,6 @@ export default function WorkItemDrawer(): JSX.Element {
     return map
   }, [item])
 
-  const [stateValue, setStateValue] = useState('')
-  const [assignee, setAssignee] = useState<AdoIdentity | null>(null)
-  const [start, setStart] = useState('')
-  const [target, setTarget] = useState('')
-
   // ------- Back / forward navigation history -------
   // The user can drill from one work item to another via Related-items
   // links, or by clicking other items in the visualisations while the
@@ -370,73 +358,11 @@ export default function WorkItemDrawer(): JSX.Element {
     })
   }, [dispatch])
 
-  useEffect(() => {
-    if (!item) return
-    setStateValue(getState(item))
-    setAssignee(getAssignee(item) ?? null)
-    setStart(isoDate(getStartDate(item)))
-    setTarget(isoDate(getTargetDate(item)))
-  }, [item])
-
-  useEffect(() => {
-    if (open) setTab('details')
-  }, [selectedWorkItemId, open])
-
-  const dirty = useMemo(() => {
-    if (!item) return false
-    return (
-      stateValue !== getState(item) ||
-      (assignee?.uniqueName ?? null) !== (getAssignee(item)?.uniqueName ?? null) ||
-      isoDate(getStartDate(item)) !== start ||
-      isoDate(getTargetDate(item)) !== target
-    )
-  }, [item, stateValue, assignee, start, target])
-
   function close(): void {
     dispatch(selectWorkItem(null))
   }
 
-  async function save(): Promise<void> {
-    if (!item) return
-    const ops: AdoJsonPatch[] = []
-    const original = {
-      state: getState(item),
-      assignee: getAssignee(item)?.uniqueName ?? null,
-      start: isoDate(getStartDate(item)),
-      target: isoDate(getTargetDate(item))
-    }
-
-    if (stateValue !== original.state) {
-      ops.push({ op: 'add', path: '/fields/System.State', value: stateValue })
-    }
-    const newAssignee = assignee?.uniqueName ?? null
-    if (newAssignee !== original.assignee) {
-      ops.push({
-        op: 'add',
-        path: '/fields/System.AssignedTo',
-        value: newAssignee ?? ''
-      })
-    }
-    if (start !== original.start) {
-      ops.push({
-        op: 'add',
-        path: '/fields/Microsoft.VSTS.Scheduling.StartDate',
-        value: dateToIso(start) ?? ''
-      })
-    }
-    if (target !== original.target) {
-      ops.push({
-        op: 'add',
-        path: '/fields/Microsoft.VSTS.Scheduling.TargetDate',
-        value: dateToIso(target) ?? ''
-      })
-    }
-
-    if (ops.length === 0) return
-    await patch({ projectId: projectId ?? undefined, id: item.id, patch: ops }).unwrap()
-  }
-
-  function focusSubtree(): void {
+  function viewInTreeView(): void {
     if (!item) return
     dispatch(
       setSource({
@@ -445,16 +371,36 @@ export default function WorkItemDrawer(): JSX.Element {
         label: `Subtree of #${item.id}`
       })
     )
-    // Close the drawer and route to the visualisation page so the user
-    // can actually *see* the new subtree they just focused on. Without
-    // this, the workspace state would change silently behind whatever
-    // page they were on (Sprint, Workspace settings, etc.).
+    // Close the drawer and land directly on the tree tab so the button
+    // label matches what the user actually sees. The user can switch
+    // tabs (Hierarchy / Timeline / etc.) after if they want a different
+    // shape — but the entry point is unambiguous.
     close()
-    navigate('/visualize')
+    navigate('/visualize?view=tree')
   }
 
   const connectionQ = useGetConnectionQuery()
   const orgUrl = connectionQ.data?.organizationUrl ?? ''
+  // Highlight comments where my display name appears so the Mentions
+  // tab → drawer flow makes it obvious *why* the item was in the list.
+  // Falls back to undefined when identity isn't resolved yet, which
+  // simply means no row is highlighted (still useful as a thread view).
+  const myNameNeedle = useMemo(() => {
+    const dn = connectionQ.data?.authenticatedUser?.displayName
+    if (!dn) return undefined
+    const trimmed = normalizeMentionName(dn)
+    return trimmed ? trimmed.toLowerCase() : undefined
+  }, [connectionQ.data])
+
+  // Pull comments only for the open item. Cached briefly via RTK Query
+  // so re-opening the same item from a relations link doesn't re-hit
+  // the network.
+  const commentsQ = useListWorkItemCommentsQuery(
+    selectedWorkItemId != null && projectId
+      ? { projectId, id: selectedWorkItemId }
+      : (undefined as never),
+    { skip: !open || !projectId }
+  )
 
   const webUrl = useMemo(() => {
     if (!item || !orgUrl) return null
@@ -491,7 +437,14 @@ export default function WorkItemDrawer(): JSX.Element {
       anchor="right"
       open={open}
       onClose={close}
-      PaperProps={{ sx: { width: 480 } }}
+      PaperProps={{
+        sx: {
+          width: DRAWER_WIDTH_PX[drawerWidth],
+          // Smooth the size change so toggling feels intentional rather
+          // than jarring — MUI's Paper has no transition by default.
+          transition: 'width 180ms ease'
+        }
+      }}
     >
       <Box
         sx={{
@@ -542,13 +495,39 @@ export default function WorkItemDrawer(): JSX.Element {
             {item ? getTitle(item) : 'Loading…'}
           </Typography>
         </Box>
-        {webUrl && (
-          <Tooltip title="Open in Azure DevOps">
-            <IconButton onClick={openInBrowser} size="small">
-              <LaunchIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
+        {item && (
+          <FavoriteButton
+            kind="workItem"
+            id={String(item.id)}
+            label={getTitle(item)}
+            projectId={projectId ?? undefined}
+            meta={{ type: getType(item), state: getState(item) }}
+            sx={{ mt: 0.25 }}
+          />
         )}
+        <Tooltip
+          title={
+            drawerWidth === 'compact'
+              ? 'Expand to fullscreen'
+              : 'Shrink to compact'
+          }
+        >
+          <IconButton
+            onClick={toggleWidth}
+            size="small"
+            aria-label={
+              drawerWidth === 'compact'
+                ? 'Expand drawer to fullscreen'
+                : 'Shrink drawer to compact'
+            }
+          >
+            {drawerWidth === 'compact' ? (
+              <OpenInFullIcon fontSize="small" />
+            ) : (
+              <CloseFullscreenIcon fontSize="small" />
+            )}
+          </IconButton>
+        </Tooltip>
         <IconButton onClick={close} size="small" aria-label="Close drawer">
           <CloseIcon fontSize="small" />
         </IconButton>
@@ -558,28 +537,44 @@ export default function WorkItemDrawer(): JSX.Element {
         <Stack
           direction="row"
           spacing={1}
-          sx={{ px: 2, py: 1, borderBottom: '1px solid', borderColor: 'divider' }}
+          // useFlexGap + flexWrap lets the action row reflow gracefully
+          // when the drawer is narrow (compact mode + zoomed text), so
+          // the secondary button drops to a second line instead of
+          // being clipped or pushing content off-screen.
+          useFlexGap
+          flexWrap="wrap"
+          sx={{
+            px: 2,
+            py: 1,
+            borderBottom: '1px solid',
+            borderColor: 'divider',
+            rowGap: 1
+          }}
         >
           <Button
             size="small"
             variant="contained"
-            startIcon={<CenterFocusStrongIcon />}
-            onClick={focusSubtree}
+            startIcon={<AccountTreeIcon />}
+            onClick={viewInTreeView}
           >
-            Focus on this subtree
+            View in tree view
           </Button>
+          {webUrl && (
+            <Button
+              size="small"
+              variant="outlined"
+              // Use endIcon for the launch glyph — the right-aligned
+              // arrow is the universal "this opens elsewhere" cue and
+              // matches how external links are rendered in GitHub /
+              // Notion / Linear.
+              endIcon={<LaunchIcon fontSize="small" />}
+              onClick={openInBrowser}
+            >
+              Open in Azure DevOps
+            </Button>
+          )}
         </Stack>
       )}
-
-      <Tabs
-        value={tab}
-        onChange={(_e, v: 'details' | 'edit') => setTab(v)}
-        variant="fullWidth"
-        sx={{ borderBottom: 1, borderColor: 'divider', minHeight: 36 }}
-      >
-        <Tab label="Details" value="details" sx={{ minHeight: 36, py: 0 }} />
-        <Tab label="Edit" value="edit" sx={{ minHeight: 36, py: 0 }} />
-      </Tabs>
 
       <Box sx={{ flex: 1, overflow: 'auto', p: 2 }}>
         {itemQ.isLoading && (
@@ -589,7 +584,7 @@ export default function WorkItemDrawer(): JSX.Element {
         )}
         {itemQ.error != null && <Alert severity="error">Failed to load work item.</Alert>}
 
-        {item && tab === 'details' && (
+        {item && (
           <Stack spacing={2.5}>
             <Stack spacing={0.75}>
               <MetadataRow label="State" value={
@@ -597,7 +592,12 @@ export default function WorkItemDrawer(): JSX.Element {
                   <Box sx={{
                     width: 10, height: 10, borderRadius: '50%',
                     bgcolor: colorForState(getState(item)),
-                    border: '1px solid rgba(0,0,0,0.08)'
+                    border: (theme) =>
+                      `1px solid ${
+                        theme.palette.mode === 'dark'
+                          ? 'rgba(255,255,255,0.18)'
+                          : 'rgba(0,0,0,0.08)'
+                      }`
                   }} />
                   {getState(item)}
                 </Stack>
@@ -674,7 +674,12 @@ export default function WorkItemDrawer(): JSX.Element {
                     p: 1.5,
                     bgcolor: 'action.hover',
                     borderRadius: 1,
-                    maxHeight: 360,
+                    // Cap at 360 px in compact so the rest of the
+                    // drawer is reachable without scrolling past a
+                    // wall of description; in expanded modes there's
+                    // plenty of vertical room so let it grow taller
+                    // (the parent box scrolls anyway).
+                    maxHeight: drawerWidth === 'compact' ? 360 : 'none',
                     overflow: 'auto'
                   }}
                 >
@@ -682,6 +687,13 @@ export default function WorkItemDrawer(): JSX.Element {
                 </Box>
               </Box>
             )}
+
+            <DiscussionSection
+              comments={commentsQ.data?.comments}
+              loading={commentsQ.isFetching}
+              error={commentsQ.error != null}
+              myNameNeedle={myNameNeedle}
+            />
 
             <Box>
               <Typography
@@ -745,94 +757,159 @@ export default function WorkItemDrawer(): JSX.Element {
           </Stack>
         )}
 
-        {item && tab === 'edit' && (
-          <Stack spacing={2}>
-            <TextField
-              select
-              label="State"
-              size="small"
-              value={stateValue}
-              onChange={(e) => setStateValue(e.target.value)}
-              SelectProps={{ native: true }}
-            >
-              {stateOptions.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-              {!stateOptions.includes(stateValue) && stateValue && (
-                <option value={stateValue}>{stateValue}</option>
-              )}
-            </TextField>
-
-            <Autocomplete
-              options={membersQ.data?.map((m) => m.identity) ?? []}
-              getOptionLabel={(opt) => opt.displayName}
-              isOptionEqualToValue={(a, b) =>
-                (a.uniqueName ?? a.id ?? '') === (b.uniqueName ?? b.id ?? '')
-              }
-              value={assignee}
-              onChange={(_e, value) => setAssignee(value)}
-              disabled={!teamId}
-              renderInput={(params) => (
-                <TextField
-                  {...params}
-                  size="small"
-                  label={
-                    teamId
-                      ? membersQ.isLoading
-                        ? 'Loading members…'
-                        : 'Assigned to'
-                      : 'Assigned to (select a team to enable picker)'
-                  }
-                />
-              )}
-            />
-
-            <Stack direction="row" spacing={2}>
-              <TextField
-                label="Start date"
-                type="date"
-                size="small"
-                value={start}
-                onChange={(e) => setStart(e.target.value)}
-                slotProps={{ inputLabel: { shrink: true } }}
-                fullWidth
-              />
-              <TextField
-                label="Target date"
-                type="date"
-                size="small"
-                value={target}
-                onChange={(e) => setTarget(e.target.value)}
-                slotProps={{ inputLabel: { shrink: true } }}
-                fullWidth
-              />
-            </Stack>
-
-            {patchState.error != null && (
-              <Alert severity="error">
-                {(patchState.error as { data?: { message?: string } }).data?.message ??
-                  'Update failed.'}
-              </Alert>
-            )}
-
-            <Stack direction="row" spacing={1} justifyContent="flex-end">
-              <Button onClick={close}>Cancel</Button>
-              <Button
-                variant="contained"
-                disabled={!dirty || patchState.isLoading}
-                onClick={save}
-                startIcon={
-                  patchState.isLoading ? <CircularProgress size={16} /> : undefined
-                }
-              >
-                Save changes
-              </Button>
-            </Stack>
-          </Stack>
-        )}
       </Box>
     </Drawer>
+  )
+}
+
+/**
+ * Discussion / comments thread for the currently-open work item.
+ *
+ * Renders newest-first (server already sorts), each comment as a card
+ * showing author + relative date + sanitised HTML body. When
+ * `myNameNeedle` is supplied, comments containing that case-insensitive
+ * substring are visually emphasised and labelled "Mentions you" — this
+ * gives the user instant context on *why* the item appears in the
+ * Mentions tab when they drill into it.
+ *
+ * The whole section collapses cleanly to a single "No comments yet"
+ * line so the drawer doesn't waste vertical space on items without
+ * discussion.
+ */
+function DiscussionSection({
+  comments,
+  loading,
+  error,
+  myNameNeedle
+}: {
+  comments: AdoComment[] | undefined
+  loading: boolean
+  error: boolean
+  myNameNeedle?: string
+}): JSX.Element {
+  const list = comments ?? []
+  return (
+    <Box>
+      <Stack
+        direction="row"
+        spacing={1}
+        alignItems="center"
+        sx={{ mb: 0.75 }}
+      >
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ textTransform: 'uppercase', letterSpacing: 0.4 }}
+        >
+          Discussion
+        </Typography>
+        {!loading && !error && (
+          <Chip
+            size="small"
+            label={list.length}
+            variant="outlined"
+            sx={{ height: 18, '& .MuiChip-label': { px: 0.75, fontSize: 10 } }}
+          />
+        )}
+        {loading && <CircularProgress size={12} />}
+      </Stack>
+
+      {error && (
+        <Alert severity="error" sx={{ py: 0.5 }}>
+          Failed to load comments.
+        </Alert>
+      )}
+
+      {!loading && !error && list.length === 0 && (
+        <Typography variant="caption" color="text.disabled" sx={{ pl: 1 }}>
+          No comments yet.
+        </Typography>
+      )}
+
+      {list.length > 0 && (
+        <Stack spacing={1}>
+          {list.map((c) => (
+            <CommentCard
+              key={c.id}
+              comment={c}
+              highlight={
+                myNameNeedle && c.text
+                  ? c.text.toLowerCase().includes(myNameNeedle)
+                  : false
+              }
+            />
+          ))}
+        </Stack>
+      )}
+    </Box>
+  )
+}
+
+/**
+ * Single comment card. Reuses `RichDescription` so inline images and
+ * @-mention markup render consistently with the work-item description
+ * above.
+ */
+function CommentCard({
+  comment,
+  highlight
+}: {
+  comment: AdoComment
+  highlight: boolean
+}): JSX.Element {
+  const created = comment.createdDate ? new Date(comment.createdDate) : null
+  const author = comment.createdBy?.displayName ?? 'Unknown'
+  return (
+    <Box
+      sx={(theme) => ({
+        p: 1.25,
+        borderRadius: 1,
+        border: '1px solid',
+        borderColor: highlight ? 'primary.main' : 'divider',
+        bgcolor: highlight
+          ? theme.palette.mode === 'dark'
+            ? 'rgba(99, 167, 255, 0.10)'
+            : 'rgba(25, 118, 210, 0.06)'
+          : 'background.paper',
+        // Subtle indicator on the left edge mirrors how chat apps mark
+        // a thread you're tagged in.
+        borderLeft: highlight ? '3px solid' : '1px solid',
+        borderLeftColor: highlight ? 'primary.main' : 'divider'
+      })}
+    >
+      <Stack
+        direction="row"
+        spacing={1}
+        alignItems="center"
+        sx={{ mb: 0.5, flexWrap: 'wrap', rowGap: 0.25 }}
+      >
+        <PersonOutlineIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
+        <Typography variant="caption" sx={{ fontWeight: 600 }}>
+          {author}
+        </Typography>
+        {created && (
+          <Tooltip title={created.toLocaleString()}>
+            <Typography variant="caption" color="text.secondary">
+              · {relativeTime(created)}
+            </Typography>
+          </Tooltip>
+        )}
+        {highlight && (
+          <Chip
+            size="small"
+            label="Mentions you"
+            color="primary"
+            sx={{
+              height: 18,
+              ml: 'auto',
+              '& .MuiChip-label': { px: 0.75, fontSize: 10, fontWeight: 600 }
+            }}
+          />
+        )}
+      </Stack>
+      <Box sx={{ pl: 0.5 }}>
+        <RichDescription html={comment.text ?? ''} />
+      </Box>
+    </Box>
   )
 }

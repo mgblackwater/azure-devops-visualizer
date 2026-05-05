@@ -8,9 +8,10 @@ import { setProject } from './store/workspaceSlice'
 import { useWorkspacePersistence } from './hooks/useWorkspacePersistence'
 import AppLayout from './components/layout/AppLayout'
 import ConnectionPage from './pages/ConnectionPage'
-import WorkspacePage from './pages/WorkspacePage'
+import HomePage from './pages/HomePage'
 import VisualizePage from './pages/VisualizePage'
 import SprintPage from './pages/SprintPage'
+import WikiPage from './pages/WikiPage'
 
 export default function App(): JSX.Element {
   const { data: connection, isLoading, refetch } = useGetConnectionQuery()
@@ -65,17 +66,21 @@ export default function App(): JSX.Element {
     <Routes>
       <Route path="/connect" element={<ConnectionPage />} />
       <Route element={<AppLayout />}>
-        <Route path="/" element={<Navigate to="/workspace" replace />} />
-        <Route path="/workspace" element={<WorkspacePage />} />
+        <Route path="/" element={<Navigate to="/home" replace />} />
+        <Route path="/home" element={<HomePage />} />
+        {/* Back-compat: the page used to be called Workspace. Keep the
+            old URL working so existing bookmarks / deep-links don't 404. */}
+        <Route path="/workspace" element={<Navigate to="/home" replace />} />
         <Route path="/visualize" element={<VisualizePage />} />
         <Route path="/sprint" element={<SprintPage />} />
+        <Route path="/wiki" element={<WikiPage />} />
         {/* Back-compat: old per-view URLs redirect into the consolidated page. */}
         <Route path="/timeline" element={<Navigate to="/visualize?view=timeline" replace />} />
         <Route path="/hierarchy" element={<Navigate to="/visualize?view=hierarchy" replace />} />
         <Route path="/graph" element={<Navigate to="/visualize?view=graph" replace />} />
         <Route path="/calendar" element={<Navigate to="/visualize?view=calendar" replace />} />
       </Route>
-      <Route path="*" element={<Navigate to="/workspace" replace />} />
+      <Route path="*" element={<Navigate to="/home" replace />} />
     </Routes>
   )
 }

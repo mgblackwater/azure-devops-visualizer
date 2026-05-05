@@ -19,7 +19,8 @@ import {
   Select,
   Stack,
   Switch,
-  Typography
+  Typography,
+  useTheme
 } from '@mui/material'
 import { applyTypeFilter, useWorkItems } from '@/hooks/useWorkItems'
 import { useAppDispatch, useAppSelector } from '@/store'
@@ -62,6 +63,8 @@ export default function GraphView({
   const filtered = useMemo(() => applyTypeFilter(raw, hiddenTypes), [raw, hiddenTypes])
   const { items, byId, links, isLoading, isFetching, error } = filtered
   const dispatch = useAppDispatch()
+  const muiTheme = useTheme()
+  const isDark = muiTheme.palette.mode === 'dark'
 
   const [showHierarchy, setShowHierarchy] = useState(true)
   const [showDependency, setShowDependency] = useState(!hierarchyOnly)
@@ -116,6 +119,16 @@ export default function GraphView({
       const id = `${kind}:${sourceId}->${targetId}`
       if (edgeMap.has(id)) return
       const isHierarchy = kind === 'hierarchy'
+      // Pick palette pieces that read on either pane background. Dependency
+      // accent uses our primary blue (which is already mode-aware in
+      // theme.ts) and the label chip pulls from MUI's surface tokens so
+      // it never ends up white-on-white or white-on-black.
+      const dependencyAccent = muiTheme.palette.primary.main
+      const hierarchyStroke = isDark ? '#6B7280' : '#9AA0A6'
+      const labelBgFill = muiTheme.palette.background.paper
+      const labelTextFill = isHierarchy
+        ? muiTheme.palette.text.secondary
+        : dependencyAccent
       edgeMap.set(id, {
         id,
         source: String(sourceId),
@@ -123,17 +136,17 @@ export default function GraphView({
         type: 'smoothstep',
         animated: !isHierarchy,
         label: isHierarchy ? undefined : 'depends on',
-        labelStyle: { fontSize: 10, fontWeight: 600, fill: '#0078D4' },
-        labelBgStyle: { fill: '#FFFFFF', fillOpacity: 0.9 },
+        labelStyle: { fontSize: 10, fontWeight: 600, fill: labelTextFill },
+        labelBgStyle: { fill: labelBgFill, fillOpacity: 0.9 },
         labelBgPadding: [3, 5],
         labelBgBorderRadius: 4,
         style: {
-          stroke: isHierarchy ? '#9AA0A6' : '#0078D4',
+          stroke: isHierarchy ? hierarchyStroke : dependencyAccent,
           strokeWidth: isHierarchy ? 1.5 : 2
         },
         markerEnd: {
           type: 'arrowclosed' as const,
-          color: isHierarchy ? '#9AA0A6' : '#0078D4'
+          color: isHierarchy ? hierarchyStroke : dependencyAccent
         }
       })
       if (isHierarchy) {
@@ -205,7 +218,9 @@ export default function GraphView({
     direction,
     sortMode,
     selectedWorkItemId,
-    childCountById
+    childCountById,
+    muiTheme,
+    isDark
   ])
 
   const onNodeClick = useCallback<NodeMouseHandler>(
@@ -222,7 +237,13 @@ export default function GraphView({
         direction="row"
         spacing={1.5}
         alignItems="center"
-        sx={{ p: 1.5, borderBottom: '1px solid rgba(0,0,0,0.08)', flexWrap: 'wrap', rowGap: 1 }}
+        sx={{
+          p: 1.5,
+          borderBottom: '1px solid',
+          borderColor: 'divider',
+          flexWrap: 'wrap',
+          rowGap: 1
+        }}
       >
         <FormControlLabel
           control={
@@ -302,6 +323,7 @@ export default function GraphView({
               edges={edges}
               nodeTypes={NODE_TYPES}
               onNodeClick={onNodeClick}
+              colorMode={muiTheme.palette.mode}
               fitView
               minZoom={0.1}
               nodesDraggable={false}

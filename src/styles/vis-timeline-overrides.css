@@ -1,0 +1,67 @@
+/*
+ * Dark-mode overrides for vis-timeline.
+ *
+ * vis-timeline ships its CSS as a single light-themed sheet (charcoal text
+ * on white panels, light gray gridlines). When the user flips the app to
+ * dark mode, we re-paint the timeline surfaces, axis text, and gridlines
+ * so the whole control sits flush with the surrounding MUI dark theme.
+ *
+ * Scoping is done via the `[data-theme="dark"]` attribute that
+ * `<ThemedApp>` mirrors onto `<html>`. We do NOT override the per-item
+ * inline styles produced by TimelineView (those carry the work-item-type
+ * background and a contrast-aware foreground), so individual bars keep
+ * their brand colours in both modes.
+ */
+
+[data-theme='dark'] .vis-timeline {
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #e6e6e6;
+}
+
+[data-theme='dark'] .vis-panel.vis-center,
+[data-theme='dark'] .vis-panel.vis-left,
+[data-theme='dark'] .vis-panel.vis-right,
+[data-theme='dark'] .vis-panel.vis-top,
+[data-theme='dark'] .vis-panel.vis-bottom {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+[data-theme='dark'] .vis-foreground .vis-group {
+  border-color: rgba(255, 255, 255, 0.06);
+}
+
+/* Time axis text + tick lines. Default fills are #4d4d4d / #e5e5e5
+ * which all but disappear on a near-black background. */
+[data-theme='dark'] .vis-time-axis .vis-text {
+  color: #d0d4dc;
+}
+[data-theme='dark'] .vis-time-axis .vis-grid.vis-minor {
+  border-color: rgba(255, 255, 255, 0.06);
+}
+[data-theme='dark'] .vis-time-axis .vis-grid.vis-major {
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+/* Background panels behind the chart area. */
+[data-theme='dark'] .vis-labelset .vis-label {
+  color: #e6e6e6;
+  border-color: rgba(255, 255, 255, 0.06);
+}
+[data-theme='dark'] .vis-labelset .vis-label .vis-inner {
+  color: #e6e6e6;
+}
+
+/* Group separator lines & odd/even striping. */
+[data-theme='dark'] .vis-foreground .vis-group {
+  border-bottom-color: rgba(255, 255, 255, 0.06);
+}
+[data-theme='dark'] .vis-itemset .vis-background {
+  background: transparent;
+}
+
+/* Tooltip surface — vis-timeline renders these into the same DOM tree. */
+[data-theme='dark'] .vis-tooltip {
+  background-color: #1f242d;
+  color: #e6e6e6;
+  border-color: rgba(255, 255, 255, 0.12);
+}

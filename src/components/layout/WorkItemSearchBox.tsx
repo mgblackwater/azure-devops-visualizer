@@ -40,7 +40,7 @@ import {
   useBatchGetWorkItemsQuery,
   useRunWiqlQuery
 } from '@/store/api/adoApi'
-import { buildSearchWiql, buildSubtreeWiql } from '@/utils/wiql'
+import { buildSearchWiql, buildSubtreeWiql, scoreSearchMatch } from '@/utils/wiql'
 import {
   getAssigneeName,
   getState,
@@ -252,21 +252,46 @@ export default function WorkItemSearchBox(): JSX.Element {
     if (isTextMode) {
       const data = matchHydratedQ.data
       if (!data) return []
-      // Preserve ADO's recently-changed-first ordering from the WIQL.
+      // Preserve ADO's recently-changed-first ordering as the *tie-breaker*
+      // only — primary sort is the client-side fuzzy relevance score so
+      // the most-matching item bubbles to the top of the dropdown even
+      // when ADO returned a stale-but-recently-touched item alongside it.
       const order = new Map<number, number>()
       matchIds.forEach((id, idx) => order.set(id, idx))
-      return data
-        .slice()
-        .sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))
-        .map<SearchOption>((w) => ({
-          kind: 'match',
-          id: w.id,
-          title: getTitle(w),
-          type: getType(w),
-          state: getState(w),
-          assignee: getAssigneeName(w),
-          tags: getTags(w)
-        }))
+      const mapped = data.map<SearchOption>((w) => ({
+        kind: 'match',
+        id: w.id,
+        title: getTitle(w),
+        type: getType(w),
+        state: getState(w),
+        assignee: getAssigneeName(w),
+        tags: getTags(w)
+      }))
+      // Only re-rank when there's a free-text portion to score against.
+      // Type-only browsing (e.g. "show me recent Bugs") keeps the
+      // changed-date order it came in with.
+      if (debouncedTextQuery.trim().length === 0) {
+        return mapped.sort(
+          (a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0)
+        )
+      }
+      const scored = mapped.map((opt) => {
+        if (opt.kind !== 'match') return { opt, score: 0 }
+        return {
+          opt,
+          score: scoreSearchMatch(debouncedTextQuery, {
+            id: opt.id,
+            title: opt.title,
+            tags: opt.tags,
+            assignee: opt.assignee
+          })
+        }
+      })
+      scored.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score
+        return (order.get(a.opt.id) ?? 0) - (order.get(b.opt.id) ?? 0)
+      })
+      return scored.map((s) => s.opt)
     }
     return recents
       .filter((r) => {
@@ -278,7 +303,15 @@ export default function WorkItemSearchBox(): JSX.Element {
         return typeSet.has(r.type.toLowerCase())
       })
       .map<SearchOption>((r) => ({ kind: 'recent', ...r }))
-  }, [isTextMode, matchHydratedQ.data, matchIds, recents, typeFilterActive, typeSet])
+  }, [
+    isTextMode,
+    matchHydratedQ.data,
+    matchIds,
+    recents,
+    typeFilterActive,
+    typeSet,
+    debouncedTextQuery
+  ])
 
   // Text mode is "loading" any time we have a query in flight or are still
   // waiting on the debounce window.
@@ -317,9 +350,9 @@ export default function WorkItemSearchBox(): JSX.Element {
     setValue('')
     setOpen(false)
     // If no project is selected we can't render the visualisations, so
-    // the user is sent to the workspace page to pick one. Otherwise jump
-    // straight to the visualisations so the freshly-loaded set is visible.
-    navigate(projectId ? '/visualize' : '/workspace')
+    // the user is sent to Home to pick one. Otherwise jump straight to
+    // the visualisations so the freshly-loaded set is visible.
+    navigate(projectId ? '/visualize' : '/home')
   }
 
   function loadAsSubtree(idsArg: number[] = ids): void {
@@ -334,7 +367,9 @@ export default function WorkItemSearchBox(): JSX.Element {
     remember([idsArg[0]])
     setValue('')
     setOpen(false)
-    navigate(projectId ? '/visualize' : '/workspace')
+    // Land on the tree tab so the affordance ("View in tree view") matches
+    // the destination — same as the drawer's button.
+    navigate(projectId ? '/visualize?view=tree' : '/home')
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLInputElement>): void {
@@ -503,7 +538,7 @@ export default function WorkItemSearchBox(): JSX.Element {
                       <Tooltip
                         title={
                           ids.length === 1
-                            ? 'Focus on this subtree (Shift+Enter)'
+                            ? 'View in tree view (Shift+Enter)'
                             : `Load these ${ids.length} items`
                         }
                       >
@@ -762,9 +797,14 @@ function SearchMatchRow({ option, highlight }: SearchMatchRowProps): JSX.Element
 }
 
 /**
- * Splits `text` around case-insensitive occurrences of `term` and renders
- * matched segments inside <mark> for visual emphasis. Falls back to plain
- * text if `term` is empty so we don't pay the regex cost for recent rows.
+ * Splits `text` around case-insensitive occurrences of every whitespace-
+ * separated token in `term` and renders matched segments inside <mark>
+ * for visual emphasis. Tokens are highlighted independently so a multi-
+ * word fuzzy query like "fix login" still lights up both words inside
+ * "Fix the login bug".
+ *
+ * Falls back to plain text if there's nothing to highlight, avoiding the
+ * regex cost for recent rows.
  */
 function HighlightedText({
   text,
@@ -773,22 +813,45 @@ function HighlightedText({
   text: string
   term: string
 }): JSX.Element {
-  const trimmedTerm = term.trim()
-  if (!trimmedTerm) return <>{text}</>
-  const parts: Array<{ text: string; match: boolean }> = []
+  const tokens = useMemo(
+    () =>
+      term
+        .trim()
+        .split(/\s+/)
+        .filter((t) => t.length > 0)
+        // Longest-first so "login" wins over "log" when ranges overlap.
+        .sort((a, b) => b.length - a.length),
+    [term]
+  )
+  if (tokens.length === 0) return <>{text}</>
+
   const lcText = text.toLowerCase()
-  const lcTerm = trimmedTerm.toLowerCase()
+  // Build a boolean mask of which characters belong to a match. This makes
+  // it trivial to merge overlapping/adjacent token hits into a single
+  // <mark> span without writing a custom interval-merge.
+  const mask = new Array<boolean>(text.length).fill(false)
+  for (const tok of tokens) {
+    const lc = tok.toLowerCase()
+    if (lc.length === 0) continue
+    let from = 0
+    while (from <= lcText.length - lc.length) {
+      const idx = lcText.indexOf(lc, from)
+      if (idx === -1) break
+      for (let i = idx; i < idx + lc.length; i += 1) mask[i] = true
+      from = idx + lc.length
+    }
+  }
+
+  const parts: Array<{ text: string; match: boolean }> = []
   let cursor = 0
   while (cursor < text.length) {
-    const idx = lcText.indexOf(lcTerm, cursor)
-    if (idx === -1) {
-      parts.push({ text: text.slice(cursor), match: false })
-      break
-    }
-    if (idx > cursor) parts.push({ text: text.slice(cursor, idx), match: false })
-    parts.push({ text: text.slice(idx, idx + trimmedTerm.length), match: true })
-    cursor = idx + trimmedTerm.length
+    const matchHere = mask[cursor]
+    let end = cursor + 1
+    while (end < text.length && mask[end] === matchHere) end += 1
+    parts.push({ text: text.slice(cursor, end), match: matchHere })
+    cursor = end
   }
+
   return (
     <>
       {parts.map((p, i) =>

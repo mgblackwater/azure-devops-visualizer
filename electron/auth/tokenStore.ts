@@ -80,6 +80,42 @@ export async function getConnectionInfo(): Promise<AdoConnectionInfo> {
   return currentInfo()
 }
 
+/**
+ * Returns true when there's a stored token and org URL, but no cached
+ * identity yet. The IPC layer uses this to decide whether to run the
+ * one-time `connectionData` lookup on app boot — keeping the actual
+ * fetch out of this module avoids a circular import with `ado/client`.
+ */
+export function needsIdentityBackfill(): boolean {
+  return (
+    !!cachedToken &&
+    !!cachedMeta?.organizationUrl &&
+    !cachedMeta.authenticatedUser
+  )
+}
+
+/**
+ * Persist a freshly resolved identity for the current connection. Used
+ * by the lazy backfill path on connection load — `setConnection` already
+ * stores the identity inline when called from the connect flow.
+ */
+export async function persistAuthenticatedUser(
+  user: AdoIdentity
+): Promise<void> {
+  await loadFromDisk()
+  if (!cachedMeta?.organizationUrl) return
+  cachedMeta = { ...cachedMeta, authenticatedUser: user }
+  try {
+    await fs.writeFile(metaPath(), JSON.stringify(cachedMeta, null, 2), {
+      encoding: 'utf8',
+      mode: 0o600
+    })
+  } catch {
+    // Best-effort — keep the in-memory copy regardless.
+  }
+  emitChanged()
+}
+
 export async function getStoredToken(): Promise<string | null> {
   await loadFromDisk()
   return cachedToken
