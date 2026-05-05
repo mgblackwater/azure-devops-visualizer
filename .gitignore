@@ -10,3 +10,9 @@ release
 .idea
 .env
 .env.local
+
+# Scratch files used during git/diagnostic operations
+.git-commit-msg.txt
+.git-status.txt
+.git-log.txt
+.git-diff-stat.txt

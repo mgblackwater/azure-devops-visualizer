@@ -1,0 +1,101 @@
+name: Build Windows Installer
+
+# Triggers:
+#  - push to main          → build + upload installer as workflow artifact
+#  - tag push (v*.*.*)     → build + publish GitHub Release with installer
+#  - manual workflow run   → build + upload installer (handy for ad-hoc builds)
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  # `contents: write` is required by softprops/action-gh-release to create
+  # the Release when a v*.*.* tag is pushed.
+  contents: write
+
+concurrency:
+  # Cancel an in-flight main build if a newer commit lands so we don't
+  # waste runner minutes on a stale revision. Tag builds get their own
+  # group so a rapid tag push won't cancel a main build.
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Build NSIS installer (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          # `npm` cache keys off package-lock.json — re-uses ~/.npm
+          # across runs so a cold install drops from ~3 min to ~30 s.
+          cache: npm
+
+      - name: Install dependencies
+        # `npm ci` requires a clean lockfile and is faster + more
+        # deterministic than `npm install` for CI.
+        run: npm ci
+
+      - name: Typecheck
+        # Fail fast before spending build minutes on a broken tree.
+        run: npm run typecheck
+
+      - name: Build renderer + main process
+        run: npm run build
+
+      - name: Package Windows installer
+        # `electron-builder --win --x64` honours electron-builder.yml so
+        # the NSIS settings (oneClick=false, perMachine=false, desktop
+        # shortcut, etc.) carry over. Output lands in release/<version>/.
+        run: npx electron-builder --win --x64 --publish never
+
+      - name: List build output
+        # Useful when debugging path mismatches in the upload step.
+        shell: pwsh
+        run: |
+          if (Test-Path release) {
+            Get-ChildItem release -Recurse -File | Select-Object FullName, Length | Format-Table
+          } else {
+            Write-Host "No release/ directory produced."
+          }
+
+      - name: Upload installer artifact
+        # Always upload so contributors and triggers without a tag can
+        # still grab the build. Retention default is 90 days; tweak via
+        # `retention-days` if you want shorter.
+        uses: actions/upload-artifact@v4
+        with:
+          name: ado-visualizer-windows-installer-${{ github.sha }}
+          # The installer file name is templated in electron-builder.yml
+          # as `${productName}-${version}-Setup.${ext}` — pick that up
+          # plus any blockmap that comes alongside.
+          path: |
+            release/**/*-Setup.exe
+            release/**/*-Setup.exe.blockmap
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Create GitHub Release (tag pushes only)
+        # Only fires on `v*.*.*` tag pushes — not on regular main pushes
+        # or manual runs. Avoids accidentally creating a release per
+        # commit while still letting you cut versioned releases by just
+        # pushing a tag.
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          # Use the tag name as the release title; let GitHub
+          # auto-generate notes from commits since the previous tag.
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release/**/*-Setup.exe
+            release/**/*-Setup.exe.blockmap
