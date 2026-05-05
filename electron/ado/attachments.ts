@@ -55,6 +55,23 @@ export async function fetchAttachmentAsBase64(url: string): Promise<AttachmentFe
       response.on('data', (chunk: Buffer) => chunks.push(chunk))
       response.on('end', () => {
         if (response.statusCode < 200 || response.statusCode >= 300) {
+          // Include the `path` query param when present (wiki / git items
+          // calls). Without it the error just shows the API endpoint and
+          // not which actual file 404'd.
+          const pathQ = target.searchParams.get('path')
+          const where = pathQ
+            ? `${target.pathname}?path=${pathQ}`
+            : target.pathname
+          // Surface the first 200 bytes of the response body — ADO
+          // sometimes returns a JSON error envelope explaining what's
+          // wrong (wrong version descriptor, file outside repo, etc.).
+          let bodyHint = ''
+          try {
+            const text = Buffer.concat(chunks).toString('utf8')
+            if (text) bodyHint = ` body=${text.slice(0, 200)}`
+          } catch {
+            /* ignore */
+          }
           reject(
             new AdoApiError(
               response.statusCode === 401
@@ -62,7 +79,7 @@ export async function fetchAttachmentAsBase64(url: string): Promise<AttachmentFe
                 : response.statusCode === 404
                   ? 'NOT_FOUND'
                   : 'INTERNAL',
-              `Attachment fetch failed (${response.statusCode}) for ${target.pathname}`,
+              `Attachment fetch failed (${response.statusCode}) for ${where}${bodyHint}`,
               response.statusCode
             )
           )
