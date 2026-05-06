@@ -37,6 +37,7 @@ export interface PreferencesState {
   defaultProjectByOrg: Record<string, string>
   workspaceByOrg: Record<string, WorkspaceSnapshot>
   themeMode: ThemeMode
+  sidebarCollapsed: boolean
 }
 
 const STORAGE_KEY = 'ado-viz:preferences:v1'
@@ -45,7 +46,8 @@ function emptyState(): PreferencesState {
   return {
     defaultProjectByOrg: {},
     workspaceByOrg: {},
-    themeMode: 'system'
+    themeMode: 'system',
+    sidebarCollapsed: false
   }
 }
 
@@ -83,6 +85,7 @@ function load(): PreferencesState {
       }
     }
     out.themeMode = sanitizeThemeMode(parsed.themeMode)
+    out.sidebarCollapsed = typeof parsed.sidebarCollapsed === 'boolean' ? parsed.sidebarCollapsed : false
     return out
   } catch {
     return emptyState()
@@ -188,6 +191,14 @@ const slice = createSlice({
     setThemeMode(state, action: PayloadAction<ThemeMode>) {
       state.themeMode = sanitizeThemeMode(action.payload)
       persist(state)
+    },
+    setSidebarCollapsed(state, action: PayloadAction<boolean>) {
+      state.sidebarCollapsed = !!action.payload
+      persist(state)
+    },
+    toggleSidebarCollapsed(state) {
+      state.sidebarCollapsed = !state.sidebarCollapsed
+      persist(state)
     }
   }
 })
@@ -218,6 +229,12 @@ export function selectThemeMode(state: {
   return state.preferences.themeMode
 }
 
+export function selectSidebarCollapsed(state: {
+  preferences: PreferencesState
+}): boolean {
+  return state.preferences.sidebarCollapsed
+}
+
 export const EMPTY_WORKSPACE_SNAPSHOT = EMPTY_SNAPSHOT
 
 export const {
@@ -225,7 +242,9 @@ export const {
   clearDefaultProject,
   saveWorkspaceSnapshot,
   clearWorkspaceSnapshot,
-  setThemeMode
+  setThemeMode,
+  setSidebarCollapsed,
+  toggleSidebarCollapsed
 } = slice.actions
 
 export default slice.reducer

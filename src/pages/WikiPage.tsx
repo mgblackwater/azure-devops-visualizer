@@ -6,6 +6,7 @@ import {
   Box,
   Button,
   Chip,
+  CircularProgress,
   IconButton,
   InputAdornment,
   Skeleton,
@@ -20,6 +21,7 @@ import LaunchIcon from '@mui/icons-material/Launch'
 import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import DescriptionIcon from '@mui/icons-material/Description'
+import FolderOpenIcon from '@mui/icons-material/FolderOpen'
 import DOMPurify from 'dompurify'
 import {
   useGetConnectionQuery,
@@ -30,7 +32,7 @@ import {
 } from '@/store/api/adoApi'
 import { useAppSelector } from '@/store'
 import { IPC } from '@shared/contract'
-import type { AdoWiki, AdoWikiPage, AdoWikiSearchHit } from '@shared/adoTypes'
+import type { AdoWiki, AdoWikiPage } from '@shared/adoTypes'
 import MarkdownView from '@/components/wiki/MarkdownView'
 import FavoriteButton from '@/components/common/FavoriteButton'
 
@@ -202,6 +204,48 @@ function WikiSidebar({
     return !!searchQ.error
   }, [wantSearch, searchQ.error])
 
+  // Tokens drive both the tree-prune decision (does this node match?)
+  // and the title highlighter inside TreeNode. Use the live input so
+  // local filtering reacts instantly; the server-side search uses the
+  // debounced term to avoid hammering alm-search on every keystroke.
+  const tokens = useMemo(() => tokenizeQuery(searchInput), [searchInput])
+  const searchActive = tokens.length > 0
+
+  const localMatches = useMemo(
+    () => collectLocalMatches(treeQ.data, tokens),
+    [treeQ.data, tokens]
+  )
+
+  // Server matches contribute paths (so the matching content page
+  // appears in the filtered tree even if its name doesn't match the
+  // term) and snippets (rendered inline beneath the matching node).
+  const serverMatches = useMemo(() => {
+    const paths = new Set<string>()
+    const snippets = new Map<string, string>()
+    for (const r of searchQ.data?.results ?? []) {
+      if (!r.path) continue
+      paths.add(r.path)
+      const snippet = pickFirstHighlight(r.hits)
+      if (snippet) snippets.set(r.path, snippet)
+    }
+    return { paths, snippets }
+  }, [searchQ.data])
+
+  const allMatches = useMemo(() => {
+    const set = new Set<string>(localMatches)
+    for (const p of serverMatches.paths) set.add(p)
+    return set
+  }, [localMatches, serverMatches.paths])
+
+  // When inactive, hand the raw tree through unchanged so the user
+  // can browse normally. When active, prune to the union of local +
+  // server matches, preserving ancestors so each match is reachable
+  // through its real path in the wiki.
+  const filteredTree = useMemo(() => {
+    if (!searchActive) return treeQ.data
+    return filterTreeByMatches(treeQ.data, allMatches) ?? undefined
+  }, [searchActive, treeQ.data, allMatches])
+
   return (
     <Box
       sx={{
@@ -270,31 +314,45 @@ function WikiSidebar({
         />
       </Stack>
 
+      {searchActive && (
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 0.75,
+            px: 1.75,
+            py: 0.5,
+            borderBottom: '1px solid',
+            borderColor: 'divider',
+            color: 'text.secondary'
+          }}
+        >
+          <Typography variant="caption" sx={{ fontSize: 11, flex: 1 }}>
+            {searchUnavailable
+              ? 'Showing page-name matches only'
+              : `${allMatches.size} match${allMatches.size === 1 ? '' : 'es'}${
+                  wantSearch && searchQ.isFetching ? ' · searching content…' : ''
+                }`}
+          </Typography>
+          {wantSearch && searchQ.isFetching && (
+            <CircularProgress size={12} thickness={5} />
+          )}
+        </Box>
+      )}
+
       <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', py: 0.5 }}>
-        {searchInput.trim().length > 0 ? (
-          <SearchResultsPanel
-            // Local fuzzy filter runs from the first character so the
-            // user gets feedback before they hit the server-search
-            // threshold.
-            inputTerm={searchInput.trim()}
-            debouncedTerm={debouncedTerm}
-            wantServerSearch={wantSearch}
-            tree={treeQ.data}
-            isFetching={searchQ.isFetching}
-            results={searchQ.data?.results}
-            serverUnavailable={searchUnavailable}
-            activePath={activePath}
-            onNavigate={onNavigateToPath}
-          />
-        ) : (
-          <PageTreePanel
-            tree={treeQ.data}
-            loading={treeQ.isLoading}
-            error={treeQ.error}
-            activePath={activePath}
-            onNavigate={onNavigateToPath}
-          />
-        )}
+        <PageTreePanel
+          tree={filteredTree}
+          loading={treeQ.isLoading}
+          error={treeQ.error}
+          activePath={activePath}
+          onNavigate={onNavigateToPath}
+          searchActive={searchActive}
+          searchTerm={searchInput.trim()}
+          tokens={tokens}
+          matchedPaths={searchActive ? allMatches : undefined}
+          snippets={searchActive ? serverMatches.snippets : undefined}
+        />
       </Box>
     </Box>
   )
@@ -304,18 +362,36 @@ function WikiSidebar({
 /* page tree                                                            */
 /* ------------------------------------------------------------------ */
 
+interface TreeContext {
+  searchActive: boolean
+  searchTerm: string
+  tokens: string[]
+  matchedPaths?: Set<string>
+  snippets?: Map<string, string>
+}
+
 function PageTreePanel({
   tree,
   loading,
   error,
   activePath,
-  onNavigate
+  onNavigate,
+  searchActive,
+  searchTerm,
+  tokens,
+  matchedPaths,
+  snippets
 }: {
   tree: AdoWikiPage | undefined
   loading: boolean
   error: unknown
   activePath: string
   onNavigate: (path: string) => void
+  searchActive: boolean
+  searchTerm: string
+  tokens: string[]
+  matchedPaths?: Set<string>
+  snippets?: Map<string, string>
 }): JSX.Element {
   if (loading) {
     return (
@@ -342,9 +418,18 @@ function PageTreePanel({
         color="text.secondary"
         sx={{ display: 'block', px: 1.5, py: 1 }}
       >
-        No pages in this wiki yet.
+        {searchActive
+          ? `No matches for “${searchTerm}”.`
+          : 'No pages in this wiki yet.'}
       </Typography>
     )
+  }
+  const ctx: TreeContext = {
+    searchActive,
+    searchTerm,
+    tokens,
+    matchedPaths,
+    snippets
   }
   return (
     <Box sx={{ px: 0.5 }}>
@@ -355,6 +440,7 @@ function PageTreePanel({
           depth={0}
           activePath={activePath}
           onNavigate={onNavigate}
+          ctx={ctx}
         />
       ))}
     </Box>
@@ -365,12 +451,14 @@ function TreeNode({
   node,
   depth,
   activePath,
-  onNavigate
+  onNavigate,
+  ctx
 }: {
   node: AdoWikiPage
   depth: number
   activePath: string
   onNavigate: (path: string) => void
+  ctx: TreeContext
 }): JSX.Element {
   const hasChildren = !!node.subPages && node.subPages.length > 0
   const isActive = node.path === activePath
@@ -387,6 +475,13 @@ function TreeNode({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [containsActive])
 
+  // While a search is active we always render every kept descendant —
+  // the whole point of the filter is "show me where these matches
+  // live". The user's manually-set `expanded` state is preserved
+  // underneath so collapse-state survives clearing the search.
+  const showChildren = hasChildren && (ctx.searchActive || expanded)
+  const isMatch = !!ctx.matchedPaths?.has(node.path)
+  const snippetHtml = ctx.snippets?.get(node.path) ?? null
   const label = lastSegment(node.path)
   return (
     <Box>
@@ -412,26 +507,44 @@ function TreeNode({
               ? 'rgba(99, 167, 255, 0.10)'
               : 'rgba(25, 118, 210, 0.08)'
             : 'transparent',
-          fontWeight: isActive ? 600 : 400,
+          fontWeight: isActive || isMatch ? 600 : 400,
           '&:hover': { bgcolor: 'action.hover' }
         })}
       >
         {hasChildren ? (
-          <IconButton
-            size="small"
-            onClick={(e) => {
-              e.stopPropagation()
-              setExpanded((v) => !v)
-            }}
-            sx={{ p: 0.25, mr: 0.25 }}
-            aria-label={expanded ? 'Collapse' : 'Expand'}
-          >
-            {expanded ? (
-              <ExpandMoreIcon fontSize="small" />
-            ) : (
-              <ChevronRightIcon fontSize="small" />
-            )}
-          </IconButton>
+          ctx.searchActive ? (
+            // During search the chevron toggle is non-functional (we
+            // force-render children), so present a static folder icon
+            // instead — keeps the row visually balanced without
+            // implying a click affordance the user can't really use.
+            <Box
+              sx={{
+                width: 24,
+                display: 'inline-flex',
+                justifyContent: 'center'
+              }}
+            >
+              <FolderOpenIcon
+                sx={{ fontSize: 16, color: 'text.disabled' }}
+              />
+            </Box>
+          ) : (
+            <IconButton
+              size="small"
+              onClick={(e) => {
+                e.stopPropagation()
+                setExpanded((v) => !v)
+              }}
+              sx={{ p: 0.25, mr: 0.25 }}
+              aria-label={expanded ? 'Collapse' : 'Expand'}
+            >
+              {expanded ? (
+                <ExpandMoreIcon fontSize="small" />
+              ) : (
+                <ChevronRightIcon fontSize="small" />
+              )}
+            </IconButton>
+          )
         ) : (
           <Box sx={{ width: 24, display: 'inline-flex', justifyContent: 'center' }}>
             <DescriptionIcon
@@ -450,10 +563,15 @@ function TreeNode({
             fontSize: 13
           }}
         >
-          {label}
+          {ctx.searchActive && ctx.tokens.length > 0
+            ? renderHighlightedLabel(label, ctx.tokens)
+            : label}
         </Typography>
       </Box>
-      {hasChildren && expanded && (
+      {snippetHtml && (
+        <SnippetBlock html={snippetHtml} indentDepth={depth} />
+      )}
+      {hasChildren && showChildren && (
         <Box>
           {node.subPages!.map((child) => (
             <TreeNode
@@ -462,6 +580,7 @@ function TreeNode({
               depth={depth + 1}
               activePath={activePath}
               onNavigate={onNavigate}
+              ctx={ctx}
             />
           ))}
         </Box>
@@ -470,265 +589,95 @@ function TreeNode({
   )
 }
 
-/* ------------------------------------------------------------------ */
-/* search results                                                       */
-/* ------------------------------------------------------------------ */
-
 /**
- * Hybrid search results: an instant local "Page matches" subsection
- * driven off the already-loaded page tree, plus a "Content matches"
- * subsection backed by the ADO wiki search API. The local pass runs
- * from the first typed character; the server pass requires
- * {@link SEARCH_MIN_CHARS} so we don't hammer the search service on
- * single-letter inputs.
- *
- * If the server search returns an error (most commonly NOT_FOUND when
- * the wiki search extension isn't installed), we hide the content
- * subsection and show a small inline note — the local "Page matches"
- * subsection remains useful on its own.
+ * Renders a wiki-search content snippet directly under its tree node.
+ * ADO's `highlights` payload uses `<em>` to mark matched tokens; we
+ * sanitise it to a tiny allowlist before rendering as HTML so search
+ * payloads can't smuggle in arbitrary markup.
  */
-function SearchResultsPanel({
-  inputTerm,
-  debouncedTerm,
-  wantServerSearch,
-  tree,
-  isFetching,
-  results,
-  serverUnavailable,
-  activePath,
-  onNavigate
+function SnippetBlock({
+  html,
+  indentDepth
 }: {
-  inputTerm: string
-  debouncedTerm: string
-  wantServerSearch: boolean
-  tree: AdoWikiPage | undefined
-  isFetching: boolean
-  results: AdoWikiSearchHit[] | undefined
-  serverUnavailable: boolean
-  activePath: string
-  onNavigate: (path: string) => void
+  html: string
+  indentDepth: number
 }): JSX.Element {
-  // Flatten the page tree once per data change. Each entry carries its
-  // human-readable title alongside the canonical path, so we can score
-  // title and path matches independently.
-  const allPages = useMemo(() => flattenPages(tree), [tree])
-  // Use the live input term (not the debounced one) so the local list
-  // updates on every keystroke — the whole point of the local pass is
-  // that it has zero latency.
-  const pageMatches = useMemo(
-    () => fuzzyMatchPages(inputTerm, allPages),
-    [inputTerm, allPages]
+  const safeHtml = useMemo(
+    () =>
+      DOMPurify.sanitize(html, {
+        ALLOWED_TAGS: ['em', 'strong', 'b', 'i', 'span'],
+        ALLOWED_ATTR: []
+      }),
+    [html]
   )
-
-  const showContentSection = wantServerSearch && !serverUnavailable
-
-  return (
-    <Box sx={{ px: 1, py: 0.5 }}>
-      <SectionHeader title="Page matches" count={pageMatches.length} />
-      {pageMatches.length === 0 ? (
-        <Typography
-          variant="caption"
-          color="text.secondary"
-          sx={{ display: 'block', px: 0.75, py: 0.5 }}
-        >
-          No page-name matches.
-        </Typography>
-      ) : (
-        <Stack spacing={0.5}>
-          {pageMatches.map((m) => (
-            <SearchHitRow
-              key={`page:${m.path}`}
-              fileName={m.title}
-              path={m.path}
-              snippetHtml={null}
-              isActive={m.path === activePath}
-              onClick={() => onNavigate(m.path)}
-            />
-          ))}
-        </Stack>
-      )}
-
-      {serverUnavailable && (
-        <Typography
-          variant="caption"
-          color="text.secondary"
-          sx={{
-            display: 'block',
-            mt: 1.5,
-            px: 0.75,
-            fontStyle: 'italic'
-          }}
-        >
-          Content search unavailable — showing page-name matches.
-        </Typography>
-      )}
-
-      {showContentSection && (
-        <Box sx={{ mt: 1.5 }}>
-          <SectionHeader
-            title="Content matches"
-            count={isFetching ? null : results?.length ?? 0}
-          />
-          {isFetching ? (
-            <Box sx={{ px: 0.5 }}>
-              {Array.from({ length: 3 }).map((_, idx) => (
-                <Skeleton key={idx} height={36} sx={{ my: 0.5 }} />
-              ))}
-            </Box>
-          ) : !results || results.length === 0 ? (
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              sx={{ display: 'block', px: 0.75, py: 0.5 }}
-            >
-              No content matches for &ldquo;{debouncedTerm}&rdquo;.
-            </Typography>
-          ) : (
-            <Stack spacing={0.5}>
-              {results.map((hit) => {
-                const path = hit.path
-                const snippet = pickFirstHighlight(hit.hits)
-                return (
-                  <SearchHitRow
-                    key={`content:${hit.wiki?.id ?? ''}:${path}`}
-                    fileName={hit.fileName || lastSegment(path)}
-                    path={path}
-                    snippetHtml={snippet}
-                    isActive={path === activePath}
-                    onClick={() => onNavigate(path)}
-                  />
-                )
-              })}
-            </Stack>
-          )}
-        </Box>
-      )}
-    </Box>
-  )
-}
-
-/**
- * Visual divider between the two search subsections. `count === null`
- * is reserved for the "loading" state of a section so we don't flash
- * a "0" while results are still in flight.
- */
-function SectionHeader({
-  title,
-  count
-}: {
-  title: string
-  count: number | null
-}): JSX.Element {
   return (
     <Box
       sx={{
-        display: 'flex',
-        alignItems: 'baseline',
-        gap: 0.75,
-        px: 0.5,
-        py: 0.5
+        // Indent the snippet under the row's icon column so it visually
+        // belongs to the matched node rather than its siblings.
+        pl: 0.5 + indentDepth * 1.25 + 3,
+        pr: 1,
+        pb: 0.75,
+        fontSize: 11.5,
+        color: 'text.secondary',
+        lineHeight: 1.4,
+        '& em': {
+          fontStyle: 'normal',
+          fontWeight: 600,
+          color: 'primary.main',
+          bgcolor: 'action.hover',
+          px: 0.25,
+          borderRadius: 0.5
+        }
       }}
-    >
-      <Typography
-        variant="overline"
-        sx={{
-          fontSize: 10.5,
-          fontWeight: 700,
-          letterSpacing: 0.6,
-          lineHeight: 1.2,
-          color: 'text.secondary'
-        }}
-      >
-        {title}
-        {count !== null ? ` · ${count}` : ''}
-      </Typography>
-    </Box>
+      dangerouslySetInnerHTML={{ __html: safeHtml }}
+    />
   )
 }
 
-function SearchHitRow({
-  fileName,
-  path,
-  snippetHtml,
-  isActive,
-  onClick
-}: {
-  fileName: string
-  path: string
-  snippetHtml: string | null
-  isActive: boolean
-  onClick: () => void
-}): JSX.Element {
-  // Highlight markup from ADO uses `<em>...</em>` to mark matched
-  // tokens — sanitise so we can render it without exposing arbitrary
-  // markup from search payloads.
-  const safeHtml = useMemo(() => {
-    if (!snippetHtml) return ''
-    return DOMPurify.sanitize(snippetHtml, {
-      ALLOWED_TAGS: ['em', 'strong', 'b', 'i', 'span'],
-      ALLOWED_ATTR: []
-    })
-  }, [snippetHtml])
+/**
+ * Splits the title around any token (case-insensitive) and wraps each
+ * matching slice in a styled `<mark>`. Tokens that overlap or appear
+ * multiple times are all highlighted; non-matching slices render as
+ * plain text. Pure presentation — the actual matching decision is
+ * already made by `nodeMatchesTokens` in the parent.
+ */
+function renderHighlightedLabel(
+  label: string,
+  tokens: string[]
+): JSX.Element {
+  if (tokens.length === 0) return <>{label}</>
+  const escaped = tokens
+    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .filter(Boolean)
+  if (escaped.length === 0) return <>{label}</>
+  const re = new RegExp(`(${escaped.join('|')})`, 'gi')
+  const parts = label.split(re)
   return (
-    <Box
-      role="button"
-      tabIndex={0}
-      onClick={onClick}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') onClick()
-      }}
-      sx={(theme) => ({
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 0.25,
-        p: 0.75,
-        borderRadius: 1,
-        cursor: 'pointer',
-        bgcolor: isActive
-          ? theme.palette.mode === 'dark'
-            ? 'rgba(99, 167, 255, 0.10)'
-            : 'rgba(25, 118, 210, 0.08)'
-          : 'transparent',
-        '&:hover': { bgcolor: 'action.hover' }
-      })}
-    >
-      <Typography
-        variant="body2"
-        sx={{ fontWeight: 600, fontSize: 13, lineHeight: 1.3 }}
-      >
-        {fileName}
-      </Typography>
-      <Typography
-        variant="caption"
-        color="text.secondary"
-        sx={{
-          fontSize: 11,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap'
-        }}
-      >
-        {path}
-      </Typography>
-      {safeHtml && (
-        <Box
-          sx={{
-            fontSize: 11.5,
-            color: 'text.secondary',
-            mt: 0.25,
-            '& em': {
-              fontStyle: 'normal',
-              fontWeight: 600,
-              color: 'primary.main',
-              bgcolor: 'action.hover',
+    <>
+      {parts.map((part, idx) => {
+        if (!part) return null
+        const isMatch = re.test(part)
+        // RegExp with /g is stateful; reset before reusing on the next
+        // slice so every check starts from index 0.
+        re.lastIndex = 0
+        if (!isMatch) return <span key={idx}>{part}</span>
+        return (
+          <Box
+            key={idx}
+            component="mark"
+            sx={{
+              bgcolor: 'warning.light',
+              color: 'warning.contrastText',
               px: 0.25,
               borderRadius: 0.5
-            }
-          }}
-          dangerouslySetInnerHTML={{ __html: safeHtml }}
-        />
-      )}
-    </Box>
+            }}
+          >
+            {part}
+          </Box>
+        )
+      })}
+    </>
   )
 }
 
@@ -929,67 +878,6 @@ function isAncestorPath(ancestor: string, descendant: string): boolean {
   return descendant.startsWith(a)
 }
 
-interface PageEntry {
-  /** Canonical wiki path, e.g. `/GPConnect-Track-Timeline`. */
-  path: string
-  /** Human-readable title — last path segment with hyphens → spaces and
-   *  URL-decoded so the local fuzzy filter can match what the user
-   *  actually sees in the sidebar. */
-  title: string
-}
-
-interface PageMatch extends PageEntry {
-  score: number
-}
-
-function flattenPages(root: AdoWikiPage | undefined): PageEntry[] {
-  if (!root) return []
-  const out: PageEntry[] = []
-  function walk(node: AdoWikiPage): void {
-    if (node.path && node.path !== '/') {
-      out.push({ path: node.path, title: lastSegment(node.path) })
-    }
-    for (const child of node.subPages ?? []) walk(child)
-  }
-  walk(root)
-  return out
-}
-
-/**
- * Token-AND substring fuzzy match against a flattened page list.
- *
- * Mirrors the model used by {@link WorkItemSearchBox}: tokenise on
- * whitespace, lowercase, and keep candidates where every token appears
- * (as a substring, case-insensitive) somewhere in the title or path.
- * The score nudges exact / prefix title hits above generic substring
- * hits so the most-relevant page bubbles to the top.
- */
-function fuzzyMatchPages(term: string, pages: PageEntry[]): PageMatch[] {
-  const trimmed = term.trim().toLowerCase()
-  if (!trimmed) return []
-  const tokens = trimmed.split(/\s+/).filter((t) => t.length > 0)
-  if (tokens.length === 0) return []
-  const out: PageMatch[] = []
-  for (const page of pages) {
-    const titleLc = page.title.toLowerCase()
-    const pathLc = page.path.toLowerCase()
-    const titleHasAll = tokens.every((t) => titleLc.includes(t))
-    const pathHasAll = tokens.every((t) => pathLc.includes(t))
-    if (!titleHasAll && !pathHasAll) continue
-    let score: number
-    if (titleLc === trimmed) score = 100
-    else if (titleLc.startsWith(trimmed)) score = 50
-    else if (titleHasAll) score = 30
-    else score = 10
-    out.push({ ...page, score })
-  }
-  out.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score
-    return a.path.localeCompare(b.path)
-  })
-  return out.slice(0, 50)
-}
-
 function pickFirstHighlight(
   hits: { fieldReferenceName: string; highlights: string[] }[] | undefined
 ): string | null {
@@ -999,4 +887,93 @@ function pickFirstHighlight(
     if (first) return first
   }
   return null
+}
+
+/* ------------------------------------------------------------------ */
+/* search-tree filtering                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Lower-cases and whitespace-splits the user's input. Empty / blank
+ * input returns an empty array, which is the canonical "search is not
+ * active" signal upstream.
+ */
+function tokenizeQuery(input: string): string[] {
+  return input
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 0)
+}
+
+/**
+ * Token-AND substring match against a single tree node. A node counts
+ * as matching when every token appears (case-insensitive) somewhere in
+ * either its rendered title (last path segment, hyphens → spaces) or
+ * its raw path. Two-axis matching lets users find pages by either the
+ * title they see or the slug ADO stores them under.
+ */
+function nodeMatchesTokens(node: AdoWikiPage, tokens: string[]): boolean {
+  if (tokens.length === 0) return false
+  if (!node.path || node.path === '/') return false
+  const titleLc = lastSegment(node.path).toLowerCase()
+  const pathLc = node.path.toLowerCase()
+  return tokens.every((t) => titleLc.includes(t) || pathLc.includes(t))
+}
+
+/**
+ * Walks the tree once and returns the canonical paths of every node
+ * whose title or path matches all of the supplied tokens. The result
+ * is later unioned with server-side content matches before pruning.
+ */
+function collectLocalMatches(
+  root: AdoWikiPage | undefined,
+  tokens: string[]
+): Set<string> {
+  const out = new Set<string>()
+  if (!root || tokens.length === 0) return out
+  function walk(node: AdoWikiPage): void {
+    if (nodeMatchesTokens(node, tokens)) out.add(node.path)
+    for (const child of node.subPages ?? []) walk(child)
+  }
+  walk(root)
+  return out
+}
+
+/**
+ * Returns a structurally-equivalent copy of the tree pruned down to
+ * just the matching nodes plus their ancestors — children of a match
+ * are NOT auto-included unless they themselves match. This mirrors how
+ * VSCode's file-explorer search behaves and keeps results focused
+ * instead of dumping a folder's entire contents because its own name
+ * happened to match. Returns `null` if nothing in the tree matches.
+ */
+function filterTreeByMatches(
+  root: AdoWikiPage | undefined,
+  matchedPaths: Set<string>
+): AdoWikiPage | null {
+  if (!root) return null
+  function walk(node: AdoWikiPage): AdoWikiPage | null {
+    const filteredChildren: AdoWikiPage[] = []
+    for (const child of node.subPages ?? []) {
+      const kept = walk(child)
+      if (kept) filteredChildren.push(kept)
+    }
+    const selfMatches = matchedPaths.has(node.path)
+    // Root passes through whenever any descendant matches even if its
+    // own path is the synthetic '/' (which never matches by token).
+    const isSyntheticRoot = !node.path || node.path === '/'
+    if (!selfMatches && filteredChildren.length === 0 && !isSyntheticRoot) {
+      return null
+    }
+    if (
+      isSyntheticRoot &&
+      filteredChildren.length === 0 &&
+      !selfMatches
+    ) {
+      return null
+    }
+    return { ...node, subPages: filteredChildren }
+  }
+  return walk(root)
 }

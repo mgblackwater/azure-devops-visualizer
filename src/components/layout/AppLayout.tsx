@@ -23,6 +23,8 @@ import MenuBookIcon from '@mui/icons-material/MenuBook'
 import LightModeIcon from '@mui/icons-material/LightMode'
 import DarkModeIcon from '@mui/icons-material/DarkMode'
 import SettingsBrightnessIcon from '@mui/icons-material/SettingsBrightness'
+import ChevronLeftIcon from '@mui/icons-material/ChevronLeft'
+import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import styled from 'styled-components'
 import {
   useClearConnectionMutation,
@@ -30,19 +32,30 @@ import {
 } from '@/store/api/adoApi'
 import { useAppDispatch, useAppSelector } from '@/store'
 import {
+  selectSidebarCollapsed,
   selectThemeMode,
   setThemeMode,
+  toggleSidebarCollapsed,
   type ThemeMode
 } from '@/store/preferencesSlice'
 import WorkItemDrawer from '@/components/workItem/WorkItemDrawer'
 import WorkItemSearchBox from '@/components/layout/WorkItemSearchBox'
 
-const Shell = styled.div`
+const SIDEBAR_WIDTH_EXPANDED = 240
+const SIDEBAR_WIDTH_COLLAPSED = 64
+
+interface CollapsibleProps {
+  $collapsed: boolean
+}
+
+const Shell = styled.div<CollapsibleProps>`
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: ${({ $collapsed }) =>
+      $collapsed ? `${SIDEBAR_WIDTH_COLLAPSED}px` : `${SIDEBAR_WIDTH_EXPANDED}px`} 1fr;
   height: 100vh;
   width: 100vw;
   overflow: hidden;
+  transition: grid-template-columns 180ms ease;
 `
 
 const Sidebar = styled.aside`
@@ -50,6 +63,7 @@ const Sidebar = styled.aside`
   background: ${({ theme }) => theme?.palette?.background?.paper ?? '#ffffff'};
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 `
 
 const Content = styled.main`
@@ -107,6 +121,7 @@ export default function AppLayout(): JSX.Element {
   const workspace = useAppSelector((s) => s.workspace)
   const themeMode = useAppSelector(selectThemeMode)
   const nextThemeMode = NEXT_THEME_MODE[themeMode]
+  const sidebarCollapsed = useAppSelector(selectSidebarCollapsed)
 
   // Sprint reads only project + team — the workspace query source is
   // irrelevant there, so don't show the source chip or the "pick a query"
@@ -128,41 +143,100 @@ export default function AppLayout(): JSX.Element {
   }, [connection?.organizationUrl])
 
   return (
-    <Shell>
+    <Shell $collapsed={sidebarCollapsed}>
       <Sidebar>
-        <Box sx={{ px: 2, py: 2 }}>
-          <Typography variant="h6" sx={{ fontWeight: 600 }}>
-            ADO Visualizer
-          </Typography>
-          {orgLabel && (
-            <Typography variant="caption" color="text.secondary">
-              {orgLabel}
-            </Typography>
+        <Box
+          sx={{
+            px: sidebarCollapsed ? 1 : 2,
+            py: 1.5,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: sidebarCollapsed ? 'center' : 'space-between',
+            gap: 1,
+            minHeight: 56
+          }}
+        >
+          {!sidebarCollapsed && (
+            <Box sx={{ minWidth: 0 }}>
+              <Typography variant="h6" sx={{ fontWeight: 600, lineHeight: 1.2 }} noWrap>
+                ADO Visualizer
+              </Typography>
+              {orgLabel && (
+                <Typography variant="caption" color="text.secondary" noWrap component="div">
+                  {orgLabel}
+                </Typography>
+              )}
+            </Box>
           )}
+          <Tooltip
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            placement="right"
+          >
+            <IconButton
+              size="small"
+              onClick={() => dispatch(toggleSidebarCollapsed())}
+              aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            >
+              {sidebarCollapsed ? <ChevronRightIcon /> : <ChevronLeftIcon />}
+            </IconButton>
+          </Tooltip>
         </Box>
         <Divider />
-        <List sx={{ flex: 1 }}>
-          {NAV.map((entry) => (
-            <ListItemButton
-              key={entry.to}
-              component={NavLink}
-              to={entry.to}
-              sx={{
-                '&.active': {
-                  bgcolor: 'action.selected',
-                  borderLeft: '3px solid',
-                  borderColor: 'primary.main'
-                }
-              }}
-            >
-              <ListItemIcon sx={{ minWidth: 36 }}>{entry.icon}</ListItemIcon>
-              <ListItemText primary={entry.label} />
-            </ListItemButton>
-          ))}
+        <List sx={{ flex: 1, py: 1 }}>
+          {NAV.map((entry) => {
+            const button = (
+              <ListItemButton
+                key={entry.to}
+                component={NavLink}
+                to={entry.to}
+                sx={{
+                  mx: sidebarCollapsed ? 0.5 : 1,
+                  px: sidebarCollapsed ? 0 : 1.5,
+                  minHeight: 44,
+                  borderRadius: 1,
+                  justifyContent: sidebarCollapsed ? 'center' : 'flex-start',
+                  '&.active': {
+                    bgcolor: 'action.selected',
+                    borderLeft: sidebarCollapsed ? 'none' : '3px solid',
+                    borderColor: 'primary.main'
+                  }
+                }}
+              >
+                <ListItemIcon
+                  sx={{
+                    minWidth: 0,
+                    mr: sidebarCollapsed ? 0 : 1.5,
+                    justifyContent: 'center'
+                  }}
+                >
+                  {entry.icon}
+                </ListItemIcon>
+                {!sidebarCollapsed && <ListItemText primary={entry.label} />}
+              </ListItemButton>
+            )
+            return sidebarCollapsed ? (
+              <Tooltip key={entry.to} title={entry.label} placement="right">
+                {button}
+              </Tooltip>
+            ) : (
+              button
+            )
+          })}
         </List>
         <Divider />
-        <Box sx={{ p: 2, display: 'flex', gap: 1, alignItems: 'center' }}>
-          <Tooltip title="Sign out (clear PAT)">
+        <Box
+          sx={{
+            p: sidebarCollapsed ? 1 : 2,
+            display: 'flex',
+            gap: 1,
+            alignItems: 'center',
+            justifyContent: sidebarCollapsed ? 'center' : 'flex-start'
+          }}
+        >
+          <Tooltip
+            title="Sign out (clear PAT)"
+            placement={sidebarCollapsed ? 'right' : 'top'}
+          >
             <IconButton
               onClick={async () => {
                 await clearConnection().unwrap()
@@ -172,9 +246,11 @@ export default function AppLayout(): JSX.Element {
               <LogoutIcon />
             </IconButton>
           </Tooltip>
-          <Typography variant="caption" color="text.secondary">
-            {connection?.hasToken ? 'Connected' : 'Not connected'}
-          </Typography>
+          {!sidebarCollapsed && (
+            <Typography variant="caption" color="text.secondary" noWrap>
+              {connection?.hasToken ? 'Connected' : 'Not connected'}
+            </Typography>
+          )}
         </Box>
       </Sidebar>
       <Content>

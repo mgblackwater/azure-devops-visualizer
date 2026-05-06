@@ -3,10 +3,16 @@ import { Box } from '@mui/material'
 import { useNavigate, type NavigateFunction } from 'react-router-dom'
 import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
-import { useGetConnectionQuery } from '@/store/api/adoApi'
+import {
+  useBatchGetWorkItemsQuery,
+  useGetConnectionQuery
+} from '@/store/api/adoApi'
 import { selectThemeMode } from '@/store/preferencesSlice'
-import { useAppSelector } from '@/store'
+import { selectWorkItem } from '@/store/workspaceSlice'
+import { useAppDispatch, useAppSelector } from '@/store'
+import { colorForState, colorForType } from '@/utils/adoColors'
 import { IPC } from '@shared/contract'
+import type { AdoWorkItem } from '@shared/adoTypes'
 
 /**
  * Lazy-loaded mermaid module. Imported on first use of a mermaid block
@@ -93,6 +99,7 @@ export default function MarkdownView({
   currentPagePath
 }: MarkdownViewProps): JSX.Element {
   const navigate = useNavigate()
+  const dispatch = useAppDispatch()
   const orgUrl = useGetConnectionQuery().data?.organizationUrl ?? ''
   const themeMode = useAppSelector(selectThemeMode)
   // Resolve actual mermaid theme name from the stored preference.
@@ -184,22 +191,73 @@ export default function MarkdownView({
   // Map of original ADO image URL → resolved data URI. `null` means
   // the fetch failed; missing entry means in-flight or never requested.
   const [imageMap, setImageMap] = useState<Record<string, string | null>>({})
+  // Sorted list of work-item ids the walker discovered in the rendered
+  // DOM. Drives a single batch fetch — see `useBatchGetWorkItemsQuery`
+  // below. Stays stable across renders (same array identity for the
+  // same id set) so the RTK cache key doesn't flap.
+  const [pendingWorkItemIds, setPendingWorkItemIds] = useState<number[]>([])
   // Reset when the source markdown / wiki changes — otherwise stale
-  // mermaid SVGs and image URLs would bleed across pages.
+  // mermaid SVGs, image URLs and work-item-ref hydrations would bleed
+  // across pages.
   useEffect(() => {
     setImageMap({})
+    setPendingWorkItemIds([])
   }, [markdown, wikiId])
 
-  // Stable click handler — captures the current navigate / wikiId via
-  // refs so we don't need to detach/reattach on every render.
+  // Stable click handler — captures the current navigate / wikiId /
+  // dispatch via refs so we don't need to detach/reattach on every
+  // render. Dispatch is technically already stable from
+  // `useAppDispatch`, but the ref keeps the click closure consistent
+  // with the other handlers.
   const navigateRef = useRef(navigate)
   navigateRef.current = navigate
   const wikiIdRef = useRef(wikiId)
   wikiIdRef.current = wikiId
+  const dispatchRef = useRef(dispatch)
+  dispatchRef.current = dispatch
 
   const handleClick = useCallback((e: Event): void => {
+    // Work-item ref chips take precedence over generic anchor handling
+    // because a chip lives inside flowing text and could otherwise be
+    // mistaken for an in-page anchor with no href. We dispatch into
+    // the workspace slice — same path the search box uses to open the
+    // drawer — so opening a wiki ref behaves identically to clicking
+    // a search hit.
+    const wiTarget = (e.target as HTMLElement | null)?.closest(
+      '[data-work-item-id]'
+    )
+    if (wiTarget) {
+      e.preventDefault()
+      const idStr = wiTarget.getAttribute('data-work-item-id')
+      const id = idStr ? parseInt(idStr, 10) : NaN
+      if (Number.isFinite(id) && id > 0) {
+        dispatchRef.current(selectWorkItem(id))
+      }
+      return
+    }
     handleAnchorClick(e, navigateRef.current, wikiIdRef.current)
   }, [])
+
+  // Single batch fetch for every work-item id referenced anywhere on
+  // the page. Skipped while the list is empty — RTK caches by the
+  // serialised arg so revisiting a page that asks for the same id set
+  // re-uses the same cache entry. We only request the four fields the
+  // chip actually needs to keep payload small.
+  const workItemRefsQ = useBatchGetWorkItemsQuery(
+    pendingWorkItemIds.length > 0
+      ? {
+          projectId,
+          ids: pendingWorkItemIds,
+          fields: [
+            'System.Id',
+            'System.Title',
+            'System.WorkItemType',
+            'System.State'
+          ]
+        }
+      : (undefined as never),
+    { skip: pendingWorkItemIds.length === 0 }
+  )
 
   useEffect(() => {
     const container = containerRef.current
@@ -208,8 +266,26 @@ export default function MarkdownView({
     return () => container.removeEventListener('click', handleClick)
   }, [handleClick])
 
-  // Walk the parsed DOM after each render: collect image URLs to fetch,
-  // rewrite resolved ones, swap mermaid blocks for SVG.
+  // imageMap is mutated by Effect A (which initiates fetches and calls
+  // setImageMap with `null` sentinels for in-flight requests). If we
+  // depended on imageMap inside Effect A, every setImageMap call would
+  // trip the effect, set `cancelled = true` on the prior run, and
+  // silently swallow the eventual IPC response — leaving images stuck
+  // forever with `data-ado-src` set but no `src`. We sidestep this by
+  // having Effect A read the current map through a ref (no
+  // subscription) and depend only on the content/context that should
+  // legitimately re-trigger discovery + fetching.
+  const imageMapRef = useRef(imageMap)
+  useEffect(() => {
+    imageMapRef.current = imageMap
+  }, [imageMap])
+
+  // Effect A: discover ADO image URLs in the rendered DOM, initiate
+  // their fetches, kick off any mermaid renders, and convert plain-text
+  // `#123` work-item references into clickable placeholder chips. Re-
+  // runs only when the content or fetch context changes — never on
+  // imageMap or workItemRefsQ.data updates (those have their own
+  // dedicated effects below).
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
@@ -234,19 +310,31 @@ export default function MarkdownView({
     }
 
     let cancelled = false
-    fetchAdoImages(adoImageUrls, imageMap, setImageMap, () => cancelled)
-    rewriteImages(container, imageMap)
+    fetchAdoImages(
+      adoImageUrls,
+      imageMapRef.current,
+      setImageMap,
+      () => cancelled
+    )
 
     const mermaidNodes = collectMermaidNodes(container)
     if (mermaidNodes.length > 0) {
       void renderMermaid(mermaidNodes, mermaidTheme, () => cancelled)
     }
+
+    // Walk the freshly-rendered DOM, replacing every standalone
+    // `#NNNNN` text run with a chip placeholder. The walker is
+    // idempotent — it skips elements that already carry the
+    // `ado-workitem-ref` class — so re-running it here when sibling
+    // deps change can't double-wrap an already-converted ref.
+    const refIds = replaceWorkItemRefs(container)
+    setPendingWorkItemIds((prev) => (sameNumberArrays(prev, refIds) ? prev : refIds))
+
     return () => {
       cancelled = true
     }
   }, [
     sanitizedHtml,
-    imageMap,
     mermaidTheme,
     orgUrl,
     orgHost,
@@ -255,6 +343,31 @@ export default function MarkdownView({
     wikiRepositoryId,
     currentPagePath
   ])
+
+  // Effect B: apply resolved data URIs to the img elements. This is
+  // the only place that touches `<img src>` — it runs on every
+  // imageMap change (a fetch completing) and on every content change
+  // (so newly-rendered images pick up cached data URIs immediately).
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    rewriteImages(container, imageMap)
+  }, [sanitizedHtml, imageMap])
+
+  // Effect C: when the work-item batch fetch resolves, populate every
+  // pending chip with the proper type / id / title / state structure
+  // and apply the type / state colors as inline CSS variables. Also
+  // re-runs on content change so newly-rendered chips pick up cached
+  // RTK data immediately without waiting for a new fetch.
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    hydrateWorkItemRefs(
+      container,
+      workItemRefsQ.data ?? null,
+      workItemRefsQ.isFetching
+    )
+  }, [sanitizedHtml, workItemRefsQ.data, workItemRefsQ.isFetching])
 
   // Hard ceiling so a runaway page can't lock the renderer. Real wiki
   // pages stay well under this; bloated docs get truncated.
@@ -412,6 +525,82 @@ export default function MarkdownView({
               theme.palette.mode === 'dark'
                 ? 'rgba(102, 187, 106, 0.10)'
                 : 'rgba(102, 187, 106, 0.14)'
+          },
+          // Inline work-item ref chip. The walker mints these around
+          // every standalone `#123` run, then Effect C populates the
+          // inner spans and sets `--wi-color` / `--wi-state-color` as
+          // inline CSS vars from the work-item type / state palette.
+          '& .ado-workitem-ref': {
+            display: 'inline-flex',
+            alignItems: 'baseline',
+            gap: 0.5,
+            mx: 0.25,
+            px: 0.75,
+            py: '1px',
+            verticalAlign: 'baseline',
+            borderRadius: 1,
+            fontSize: 12.5,
+            lineHeight: 1.4,
+            cursor: 'pointer',
+            bgcolor: codeBg,
+            border: `1px solid ${tableBorder}`,
+            borderLeft: '3px solid',
+            borderLeftColor: 'var(--wi-color, transparent)',
+            textDecoration: 'none',
+            transition:
+              'background 120ms ease, border-color 120ms ease, transform 120ms ease',
+            '&:hover': {
+              bgcolor: 'action.hover',
+              borderLeftColor: 'var(--wi-color, transparent)'
+            },
+            '&:focus-visible': {
+              outline: `2px solid ${theme.palette.primary.main}`,
+              outlineOffset: 2
+            }
+          },
+          '& .ado-workitem-ref-type': {
+            fontSize: 10.5,
+            fontWeight: 700,
+            textTransform: 'uppercase',
+            letterSpacing: 0.4,
+            color: 'var(--wi-color)'
+          },
+          '& .ado-workitem-ref-id': {
+            fontWeight: 600,
+            color: 'text.primary',
+            fontVariantNumeric: 'tabular-nums'
+          },
+          '& .ado-workitem-ref-title': {
+            fontWeight: 400,
+            color: 'text.primary',
+            maxWidth: 360,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap'
+          },
+          '& .ado-workitem-ref-state': {
+            fontSize: 10.5,
+            fontWeight: 600,
+            color: 'var(--wi-state-color, currentColor)',
+            px: 0.5,
+            borderRadius: 0.5,
+            border: '1px solid',
+            borderColor: 'var(--wi-state-color, divider)'
+          },
+          '& .ado-workitem-ref-pending': {
+            // Visual cue for "we know this is a ref but haven't loaded
+            // it yet" — neutral border, slightly muted. Resolves into
+            // the type-color border once Effect C runs.
+            borderLeftColor: theme.palette.divider,
+            opacity: 0.75
+          },
+          '& .ado-workitem-ref-error': {
+            // Either the work item doesn't exist, or the user can't
+            // see it. We keep the chip clickable so they can still try
+            // to open it in case authorisation is the only blocker.
+            borderLeftColor: theme.palette.error.main,
+            opacity: 0.75,
+            fontStyle: 'italic'
           }
         }
       }}
@@ -680,6 +869,91 @@ function collectAdoImageUrls(
 }
 
 /**
+ * Convert a wiki "display path" (page titles with spaces, e.g.
+ * `/GPC Revamp/Technical Docs/Infrastructure`) into the path ADO
+ * actually stores those pages at in the wiki's Git repo (e.g.
+ * `/GPC-Revamp/Technical-Docs/Infrastructure`). ADO's slug rule per
+ * page-segment is "spaces → hyphens"; hyphens already in titles are
+ * preserved, so the operation is idempotent for already-slugged paths.
+ *
+ * We deliberately don't touch other special characters here — the
+ * vast majority of wiki page names use only spaces + alphanumerics,
+ * and over-aggressive slug rules (parens, colons, etc.) risk breaking
+ * paths that already came in disk-form. If a wiki has stranger page
+ * names, the upstream `gitItemPath` field is the correct source — but
+ * for this pass, simple space→hyphen handles the IHIS-HIP shape and
+ * everything similar.
+ */
+function wikiPagePathToGitPath(displayPath: string): string {
+  return displayPath
+    .split('/')
+    .map((seg) => seg.replace(/ /g, '-'))
+    .join('/')
+}
+
+/**
+ * Decode percent-escapes once, defensively.
+ *
+ * markdown-it normalizes a markdown image src like `Foo Bar.png` to
+ * `Foo%20Bar.png` before handing it to renderers. If we then pass that
+ * pre-encoded value straight to `URLSearchParams.set('path', ...)`, the
+ * `%` itself gets re-encoded as `%25`, producing `Foo%2520Bar.png` in
+ * the final URL. ADO faithfully decodes that to a file literally named
+ * `Foo%20Bar.png` (with the percent-2-zero text in its name) and 404s.
+ *
+ * A single decode here flattens that round-trip — and is idempotent for
+ * srcs that arrived without any encoding to begin with.
+ */
+function decodeOnce(s: string): string {
+  try {
+    return decodeURIComponent(s)
+  } catch {
+    return s
+  }
+}
+
+/**
+ * Encode a wiki repo path as the `path=` query value in a Git Items API
+ * URL the same way the ADO web UI does: each segment is
+ * percent-encoded, but the `/` separators are kept literal. This avoids
+ * `URLSearchParams`'s defaults (`+` for space, `%2F` for `/`) which —
+ * while technically RFC-compliant — don't match ADO's wire format and
+ * make round-trip debugging much harder.
+ */
+function encodePathForAdoQuery(path: string): string {
+  return path.split('/').map(encodeURIComponent).join('/')
+}
+
+/**
+ * Resolve `.`/`..` segments inside a path the way a web browser does
+ * for relative `<img src>` resolution.
+ *
+ * ADO's Git Items API treats paths literally — it won't follow a `..`
+ * inside the `path=` query value. So if a wiki page at
+ * `/Foo/Bar/Baz` references `![](../assets/x.png)`, the joined path
+ * `/Foo/Bar/Baz/../assets/x.png` reaches ADO as a 404 unless we
+ * collapse the `..` ourselves to `/Foo/Bar/assets/x.png` first.
+ *
+ * Pop semantics: a leading `..` past root is ignored (path stays at
+ * root), matching how browsers handle `<a href="../foo">` from the
+ * domain root. Empty segments and `.` are dropped. Trailing slashes
+ * are not preserved — wiki image paths never end in `/` anyway.
+ */
+function normalizeWikiPath(path: string): string {
+  const isAbsolute = path.startsWith('/')
+  const out: string[] = []
+  for (const seg of path.split('/')) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') {
+      if (out.length > 0) out.pop()
+      continue
+    }
+    out.push(seg)
+  }
+  return (isAbsolute ? '/' : '') + out.join('/')
+}
+
+/**
  * Map a raw `<img src>` in wiki markdown to an absolute, authenticated
  * URL we can fetch through the main process.
  *
@@ -700,12 +974,18 @@ function collectAdoImageUrls(
  * Returns `null` for `data:` / `mailto:` / `javascript:` and similar —
  * leaves the original src alone so the renderer doesn't strip it.
  *
- * For relative paths we hit the Git items endpoint with
- * `versionDescriptor.version=wikiMaster` (the implicit branch for
- * project wikis) and `download=false&resolveLfs=true&sanitize=true`.
- * That's the exact combination the ADO web UI uses for inline wiki
- * images and the only one that returns binary reliably for newer wiki
- * versions.
+ * Path handling notes:
+ *   - The markdown src is decoded once (see {@link decodeOnce}) so we
+ *     never feed a `%`-bearing string to a second URL-encoder.
+ *   - Page-derived directory segments are slug-converted (see
+ *     {@link wikiPagePathToGitPath}) because ADO stores wiki pages with
+ *     hyphens-for-spaces in folder names, even though the API exposes
+ *     display titles with spaces.
+ *   - Asset filenames are preserved verbatim — only the directory
+ *     portion is slug-converted — because asset filenames keep their
+ *     original spaces in the repo.
+ *   - The final query string is hand-built so spaces emerge as `%20`
+ *     and `/` stays literal, mirroring ADO's web UI byte-for-byte.
  */
 function resolveWikiImageUrl(
   rawSrc: string,
@@ -735,48 +1015,81 @@ function resolveWikiImageUrl(
   }
   if (!ctx.projectId || !ctx.wikiRepositoryId) return null
 
-  // Resolve the path inside the wiki repo. Two distinct shapes:
-  //   1. `/.attachments/...` — wiki-root attachments folder.
-  //   2. anything else       — relative to the current page's folder.
-  let resolvedPath: string | null = null
-  const trimmedNoLeadingDot = trimmed.replace(/^\.\/+/, '')
-  if (/^\/?\.attachments\//i.test(trimmedNoLeadingDot)) {
-    // Always rooted at wiki root, regardless of the current page.
-    resolvedPath = trimmedNoLeadingDot.startsWith('/')
-      ? trimmedNoLeadingDot
-      : `/${trimmedNoLeadingDot}`
-  } else if (trimmedNoLeadingDot.startsWith('/')) {
-    // An explicit absolute wiki path like `/Some-Folder/foo.png`.
-    resolvedPath = trimmedNoLeadingDot
-  } else {
-    // Page-relative: resolve inside the page's folder. ADO stores wiki
-    // pages such that any page (leaf or parent) lives at its own
-    // `<page-path>` and sibling assets live in `<page-path>/...`.
-    if (!ctx.currentPagePath) return null
-    const pageDir = ctx.currentPagePath.replace(/\/+$/, '')
-    resolvedPath = `${pageDir}/${trimmedNoLeadingDot}`
-  }
-  if (!resolvedPath) return null
+  // Decode once before any further processing — see decodeOnce JSDoc.
+  const decoded = decodeOnce(trimmed)
 
-  try {
-    const u = new URL(
-      `${ctx.orgUrl.replace(/\/+$/, '')}/${encodeURIComponent(ctx.projectId)}/_apis/git/repositories/${encodeURIComponent(ctx.wikiRepositoryId)}/items`
+  // Build a single joined path, then normalize. Three input shapes:
+  //   1. `/.attachments/...` — wiki-root attachments folder. Bypass page
+  //      resolution entirely; `.attachments` is a literal directory the
+  //      ADO editor uses for paste-uploaded images.
+  //   2. `/Some/Path/foo.png` — author-supplied absolute repo path.
+  //      Anchored at wiki root, no `currentPagePath` involved.
+  //   3. anything else        — relative to the current page's folder.
+  //      Per ADO's wiki rules, "the current page's folder" means the
+  //      slug-form folder named after the page (where its sub-pages
+  //      and assets live), not the parent directory of the .md file.
+  //
+  // After joining, we normalize so any `.` and `..` segments collapse
+  // before the path becomes a query value — ADO's Items API treats
+  // paths literally and won't follow `..` itself.
+  let joinedPath: string
+  const decodedNoLeadingDot = decoded.replace(/^\.\/+/, '')
+  if (/^\/?\.attachments\//i.test(decodedNoLeadingDot)) {
+    joinedPath = decodedNoLeadingDot.startsWith('/')
+      ? decodedNoLeadingDot
+      : `/${decodedNoLeadingDot}`
+  } else if (decoded.startsWith('/')) {
+    // Slug-convert just the directory portion (idempotent for paths
+    // that already arrive in hyphen form) and preserve the filename
+    // verbatim — asset filenames keep their repo-stored spaces.
+    const idxLastSlash = decoded.lastIndexOf('/')
+    const dir = decoded.slice(0, idxLastSlash)
+    const file = decoded.slice(idxLastSlash + 1)
+    joinedPath = `${wikiPagePathToGitPath(dir)}/${file}`
+  } else {
+    if (!ctx.currentPagePath) return null
+    // ADO's wiki renderer resolves relative paths against the PARENT
+    // DIRECTORY of the page's .md file — not against a folder named
+    // after the page (that folder is where sub-pages live, not where
+    // assets are searched). E.g. for a page at /Foo/Bar/Baz, the .md
+    // file is /Foo/Bar/Baz.md and `assets/x.png` resolves to
+    // /Foo/Bar/assets/x.png — sibling of Baz.md, NOT under /Foo/Bar/Baz/.
+    //
+    // Strip the page name (the last segment of the slug-form path) to
+    // get that parent. Top-level pages collapse to `''`, joining to
+    // `/<src>` which is wiki-root-relative — also correct.
+    const slugged = wikiPagePathToGitPath(ctx.currentPagePath).replace(
+      /\/+$/,
+      ''
     )
-    u.searchParams.set('path', resolvedPath)
-    u.searchParams.set('$format', 'octetStream')
-    // Match what the ADO web UI sends for inline wiki images. `download`
-    // is intentionally false; `resolveLfs=true` follows Git LFS pointers
-    // for orgs that store large binary assets in LFS; `sanitize=true`
-    // strips active content from served files.
-    u.searchParams.set('download', 'false')
-    u.searchParams.set('resolveLfs', 'true')
-    u.searchParams.set('sanitize', 'true')
-    u.searchParams.set('versionDescriptor.version', 'wikiMaster')
-    u.searchParams.set('api-version', '7.1')
-    return u.toString()
-  } catch {
-    return null
+    const lastSlash = slugged.lastIndexOf('/')
+    const pageParentDir = lastSlash >= 0 ? slugged.slice(0, lastSlash) : ''
+    // Pass the raw decoded src — normalizeWikiPath below collapses any
+    // `./` and `..` segments in a single pass.
+    joinedPath = `${pageParentDir}/${decoded}`
   }
+
+  const resolvedPath = normalizeWikiPath(joinedPath)
+  if (!resolvedPath || resolvedPath === '/') return null
+
+  // Build the URL manually so we match ADO's web UI byte-for-byte.
+  // `URLSearchParams` would emit `+` for space and `%2F` for `/`, which
+  // ADO's API tolerates but doesn't itself emit — and that mismatch
+  // makes manual URL comparison during debugging much noisier.
+  const base = ctx.orgUrl.replace(/\/+$/, '')
+  const projectSeg = encodeURIComponent(ctx.projectId)
+  const repoSeg = encodeURIComponent(ctx.wikiRepositoryId)
+  const pathParam = encodePathForAdoQuery(resolvedPath)
+  return (
+    `${base}/${projectSeg}/_apis/git/repositories/${repoSeg}/items` +
+    `?path=${pathParam}` +
+    `&%24format=octetStream` +
+    `&download=false` +
+    `&resolveLfs=true` +
+    `&sanitize=true` +
+    `&versionDescriptor.version=wikiMaster` +
+    `&api-version=7.1`
+  )
 }
 
 function fetchAdoImages(
@@ -820,6 +1133,225 @@ function fetchAdoImages(
         // ADO URL (which would 401).
       })
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* work-item ref chips                                                  */
+/* ------------------------------------------------------------------ */
+
+const WORK_ITEM_REF_SKIP_TAGS = new Set([
+  'A',
+  'CODE',
+  'PRE',
+  'SCRIPT',
+  'STYLE',
+  'TEXTAREA'
+])
+
+const WORK_ITEM_REF_SKIP_CLASSES = ['ado-mermaid', 'ado-workitem-ref']
+
+/**
+ * Convert every standalone `#NNNNN` run in the rendered DOM to a
+ * placeholder chip. Returns the unique, sorted set of work-item ids
+ * the walker spotted so Effect A can drive a single batch fetch.
+ *
+ * Skip rules:
+ *  - inside `<a>` / `<code>` / `<pre>` / `<script>` / `<style>` /
+ *    `<textarea>` — those carry their own meaning and shouldn't be
+ *    chipped (think: a sample snippet that mentions issue numbers).
+ *  - inside any element that already carries `ado-mermaid` or
+ *    `ado-workitem-ref` — keeps the walker idempotent so re-running
+ *    it can never wrap an already-wrapped chip.
+ *
+ * Match rules:
+ *  - `#` followed by 1..9 digits — anything longer is almost
+ *    certainly not a work-item id (timestamps, hashes, etc.)
+ *  - the character before `#` must NOT be an ASCII letter or `_`.
+ *    This lets us pick up `Issue #123`, `Closed #123.`, even
+ *    `#123#456` (chained refs), while ignoring `abc#123` (which is
+ *    almost always part of a URL fragment, identifier or HTML id).
+ */
+function replaceWorkItemRefs(container: HTMLElement): number[] {
+  const ids = new Set<number>()
+  const walker = document.createTreeWalker(
+    container,
+    NodeFilter.SHOW_TEXT,
+    {
+      acceptNode(node: Node): number {
+        let p = (node as Text).parentElement
+        while (p && p !== container) {
+          if (WORK_ITEM_REF_SKIP_TAGS.has(p.tagName)) {
+            return NodeFilter.FILTER_REJECT
+          }
+          for (const cls of WORK_ITEM_REF_SKIP_CLASSES) {
+            if (p.classList.contains(cls)) return NodeFilter.FILTER_REJECT
+          }
+          p = p.parentElement
+        }
+        return /#\d/.test(node.nodeValue ?? '')
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_SKIP
+      }
+    }
+  )
+  const targets: Text[] = []
+  let n: Node | null = walker.nextNode()
+  while (n) {
+    targets.push(n as Text)
+    n = walker.nextNode()
+  }
+  for (const textNode of targets) {
+    processWorkItemRefTextNode(textNode, ids)
+  }
+  return [...ids].sort((a, b) => a - b)
+}
+
+function processWorkItemRefTextNode(
+  node: Text,
+  foundIds: Set<number>
+): void {
+  const text = node.nodeValue ?? ''
+  const re = /#(\d{1,9})/g
+  const fragments: Node[] = []
+  let lastIndex = 0
+  let m: RegExpExecArray | null
+  let matched = false
+  while ((m = re.exec(text)) !== null) {
+    const start = m.index
+    const id = parseInt(m[1], 10)
+    if (!Number.isFinite(id) || id <= 0) continue
+    // Reject when the immediate previous character is a letter or
+    // underscore — that means we're sitting inside a word or
+    // identifier (e.g. `abc#123`, `id_#1`) rather than a real ref.
+    const prev = start > 0 ? text[start - 1] : ''
+    if (/[a-zA-Z_]/.test(prev)) continue
+    if (start > lastIndex) {
+      fragments.push(document.createTextNode(text.slice(lastIndex, start)))
+    }
+    fragments.push(makeWorkItemRefChip(id))
+    foundIds.add(id)
+    lastIndex = re.lastIndex
+    matched = true
+  }
+  if (!matched) return
+  if (lastIndex < text.length) {
+    fragments.push(document.createTextNode(text.slice(lastIndex)))
+  }
+  const parent = node.parentNode
+  if (!parent) return
+  for (const f of fragments) parent.insertBefore(f, node)
+  parent.removeChild(node)
+}
+
+/**
+ * Mints the placeholder chip the walker drops into the DOM. The shape
+ * mirrors the post-hydration chip (same wrapper class + id span) so
+ * styling is consistent across states; the hydrator just appends the
+ * remaining spans (type, title, state) once the batch fetch resolves.
+ */
+function makeWorkItemRefChip(id: number): HTMLSpanElement {
+  const chip = document.createElement('span')
+  chip.className = 'ado-workitem-ref ado-workitem-ref-pending'
+  chip.setAttribute('data-work-item-id', String(id))
+  chip.setAttribute('role', 'link')
+  chip.setAttribute('tabindex', '0')
+  chip.setAttribute('title', `Work item #${id} — loading…`)
+  const idSpan = document.createElement('span')
+  idSpan.className = 'ado-workitem-ref-id'
+  idSpan.textContent = `#${id}`
+  chip.appendChild(idSpan)
+  return chip
+}
+
+/**
+ * Populate every chip with type / title / state once the batch fetch
+ * resolves. `data-hydrated` guards against re-running on an already-
+ * hydrated chip (idempotent across Effect C re-runs). Failures (id
+ * not in the response) get a softer "error" styling but stay
+ * clickable — opening the drawer might surface an authorisation hint
+ * the wiki view alone can't.
+ */
+function hydrateWorkItemRefs(
+  container: HTMLElement,
+  items: AdoWorkItem[] | null,
+  fetching: boolean
+): void {
+  const byId = new Map<number, AdoWorkItem>()
+  if (items) for (const w of items) byId.set(w.id, w)
+  const chips = container.querySelectorAll<HTMLElement>('[data-work-item-id]')
+  chips.forEach((chip) => {
+    if (chip.getAttribute('data-hydrated') === 'true') return
+    const idStr = chip.getAttribute('data-work-item-id')
+    const id = idStr ? parseInt(idStr, 10) : NaN
+    if (!Number.isFinite(id)) return
+    const wi = byId.get(id)
+    if (!wi) {
+      // Either the fetch is still in flight or the id wasn't returned
+      // (deleted / inaccessible). Only commit the error styling when
+      // we know the fetch finished — otherwise the chip would flash
+      // red for a frame between request and response.
+      if (!fetching) {
+        chip.classList.remove('ado-workitem-ref-pending')
+        chip.classList.add('ado-workitem-ref-error')
+        chip.setAttribute('title', `Work item #${id} — not accessible`)
+      }
+      return
+    }
+    const type =
+      (wi.fields['System.WorkItemType'] as string | undefined) ?? 'Item'
+    const state =
+      (wi.fields['System.State'] as string | undefined) ?? ''
+    const title = (wi.fields['System.Title'] as string | undefined) ?? ''
+    const typeColor = colorForType(type)
+    const stateColor = colorForState(state)
+    chip.classList.remove(
+      'ado-workitem-ref-pending',
+      'ado-workitem-ref-error'
+    )
+    chip.setAttribute('data-hydrated', 'true')
+    chip.setAttribute('data-work-item-type', type)
+    chip.setAttribute('data-work-item-state', state)
+    chip.style.setProperty('--wi-color', typeColor)
+    chip.style.setProperty('--wi-state-color', stateColor)
+    chip.setAttribute(
+      'title',
+      `${type} #${id} — ${title}${state ? ` (${state})` : ''}`
+    )
+    chip.replaceChildren()
+    const typeBadge = document.createElement('span')
+    typeBadge.className = 'ado-workitem-ref-type'
+    typeBadge.textContent = type
+    const idSpan = document.createElement('span')
+    idSpan.className = 'ado-workitem-ref-id'
+    idSpan.textContent = `#${id}`
+    const titleSpan = document.createElement('span')
+    titleSpan.className = 'ado-workitem-ref-title'
+    titleSpan.textContent = title
+    chip.append(typeBadge, idSpan, titleSpan)
+    if (state) {
+      const stateSpan = document.createElement('span')
+      stateSpan.className = 'ado-workitem-ref-state'
+      stateSpan.textContent = state
+      chip.appendChild(stateSpan)
+    }
+  })
+}
+
+/**
+ * Stable equality for the `pendingWorkItemIds` setter. Returning the
+ * previous array when the new list is value-equal keeps React from
+ * scheduling a no-op re-render and (more importantly) keeps the RTK
+ * Query cache key for {@link useBatchGetWorkItemsQuery} stable across
+ * benign re-walks of the same content.
+ */
+function sameNumberArrays(
+  a: readonly number[],
+  b: readonly number[]
+): boolean {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false
+  return true
 }
 
 function rewriteImages(
