@@ -8,6 +8,7 @@ import {
   CircularProgress,
   FormControl,
   IconButton,
+  InputAdornment,
   InputLabel,
   LinearProgress,
   MenuItem,
@@ -26,6 +27,8 @@ import AssignmentIndIcon from '@mui/icons-material/AssignmentInd'
 import AlternateEmailIcon from '@mui/icons-material/AlternateEmail'
 import CallSplitIcon from '@mui/icons-material/CallSplit'
 import RefreshIcon from '@mui/icons-material/Refresh'
+import SearchIcon from '@mui/icons-material/Search'
+import ClearIcon from '@mui/icons-material/Clear'
 import {
   useBatchGetWorkItemsQuery,
   useGetConnectionQuery,
@@ -53,7 +56,16 @@ import {
   buildMentionsMeWiql,
   normalizeMentionName
 } from '@/utils/wiql'
-import { getChangedDate } from '@/utils/workItemFields'
+import {
+  getAssigneeName,
+  getChangedDate,
+  getState,
+  getTags,
+  getTitle,
+  getType
+} from '@/utils/workItemFields'
+import { fuzzyMatches } from '@/utils/fuzzyMatch'
+import type { AdoWorkItem } from '@shared/adoTypes'
 
 type MyWorkTab = 'assigned' | 'mentions' | 'favorites' | 'pullRequests'
 
@@ -341,8 +353,78 @@ function MyWorkPanel({
     (s) => selectFavorites(s, orgUrl).length
   )
 
+  /**
+   * Per-tab fuzzy filter. Stored as a single state slot that gets reset
+   * on every tab change — switching tabs is a hard reset (per the v0.3.1
+   * spec) rather than a "remember per tab" flow, so we don't need a
+   * `Record<MyWorkTab, string>` here. Pull-requests has its own search
+   * affordance baked into `PullRequestsList`, so we don't render the
+   * search row for that tab.
+   */
+  const [filterQuery, setFilterQuery] = useState('')
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+
+  function changeTab(v: MyWorkTab): void {
+    setTab(v)
+    setFilterQuery('')
+  }
+
+  /**
+   * `/` to focus the search box, but only when the active element isn't
+   * already capturing keystrokes (input/textarea/contenteditable). The
+   * listener is attached to the panel container so it doesn't intercept
+   * `/` typed elsewhere on the page (e.g. the project picker up top).
+   * `e.preventDefault()` swallows the slash so it doesn't end up in the
+   * newly-focused field.
+   */
+  useEffect(() => {
+    const node = panelRef.current
+    if (!node) return
+    function onKeyDown(e: KeyboardEvent): void {
+      if (e.key !== '/') return
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const active = document.activeElement as HTMLElement | null
+      if (active) {
+        const tag = active.tagName
+        if (
+          tag === 'INPUT' ||
+          tag === 'TEXTAREA' ||
+          tag === 'SELECT' ||
+          active.isContentEditable
+        ) {
+          return
+        }
+      }
+      const input = searchInputRef.current
+      if (!input) return
+      e.preventDefault()
+      input.focus()
+      input.select()
+    }
+    node.addEventListener('keydown', onKeyDown)
+    return () => node.removeEventListener('keydown', onKeyDown)
+  }, [])
+
+  const showFilter = tab !== 'pullRequests'
+  const filterPlaceholder = FILTER_PLACEHOLDER[tab]
+
   return (
-    <>
+    <Box
+      ref={panelRef}
+      // tabIndex makes the panel itself focusable so keyboard events can
+      // bubble through it even when no row is focused — without this the
+      // `/` listener above only fires after the user has clicked into a
+      // child element.
+      tabIndex={-1}
+      sx={{
+        flex: 1,
+        minHeight: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        outline: 'none'
+      }}
+    >
       <Stack
         direction="row"
         alignItems="center"
@@ -354,7 +436,7 @@ function MyWorkPanel({
       >
         <Tabs
           value={tab}
-          onChange={(_e, v: MyWorkTab) => setTab(v)}
+          onChange={(_e, v: MyWorkTab) => changeTab(v)}
           sx={{
             minHeight: 44,
             flex: 1,
@@ -406,9 +488,66 @@ function MyWorkPanel({
         </Tabs>
       </Stack>
 
+      {showFilter && (
+        <Box
+          sx={{
+            px: 1.5,
+            py: 1,
+            borderBottom: '1px solid',
+            borderColor: 'divider',
+            bgcolor: 'background.paper'
+          }}
+        >
+          <TextField
+            inputRef={searchInputRef}
+            size="small"
+            fullWidth
+            placeholder={filterPlaceholder}
+            value={filterQuery}
+            onChange={(e) => setFilterQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.stopPropagation()
+                setFilterQuery('')
+                ;(e.target as HTMLInputElement).blur()
+              }
+            }}
+            slotProps={{
+              input: {
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchIcon fontSize="small" />
+                  </InputAdornment>
+                ),
+                endAdornment: filterQuery ? (
+                  <InputAdornment position="end">
+                    <Tooltip title="Clear filter (Esc)">
+                      <IconButton
+                        size="small"
+                        edge="end"
+                        onClick={() => {
+                          setFilterQuery('')
+                          searchInputRef.current?.focus()
+                        }}
+                        aria-label="Clear filter"
+                      >
+                        <ClearIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  </InputAdornment>
+                ) : null
+              }
+            }}
+          />
+        </Box>
+      )}
+
       <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
         {tab === 'favorites' ? (
-          <FavoritesTab />
+          <FavoritesTab
+            filterQuery={filterQuery}
+            onClearFilter={() => setFilterQuery('')}
+          />
         ) : !projectId ? (
           <Box sx={{ p: 4, textAlign: 'center' }}>
             <Typography color="text.secondary">
@@ -421,6 +560,8 @@ function MyWorkPanel({
             wiql={buildAssignedToMeWiql(MY_WORK_LIMIT)}
             onOpen={onOpen}
             emptyText="Nothing is assigned to you in this project."
+            filterQuery={filterQuery}
+            onClearFilter={() => setFilterQuery('')}
           />
         ) : tab === 'pullRequests' ? (
           <PullRequestsList
@@ -439,11 +580,20 @@ function MyWorkPanel({
             identityLoading={identityLoading}
             onRefetchIdentity={onRefetchIdentity}
             onOpen={onOpen}
+            filterQuery={filterQuery}
+            onClearFilter={() => setFilterQuery('')}
           />
         )}
       </Box>
-    </>
+    </Box>
   )
+}
+
+const FILTER_PLACEHOLDER: Record<MyWorkTab, string> = {
+  assigned: 'Filter assigned items by id, title, type, state, tags…',
+  mentions: 'Filter mentions by id, title, mention snippet, author…',
+  favorites: 'Filter favorites by title, type, project…',
+  pullRequests: ''
 }
 
 /**
@@ -457,13 +607,17 @@ function MentionsList({
   displayName,
   identityLoading,
   onRefetchIdentity,
-  onOpen
+  onOpen,
+  filterQuery,
+  onClearFilter
 }: {
   projectId: string
   displayName: string | undefined
   identityLoading: boolean
   onRefetchIdentity: () => void
   onOpen: (id: number) => void
+  filterQuery: string
+  onClearFilter: () => void
 }): JSX.Element {
   /**
    * Two-stage state for the manual fallback so we don't fire a WIQL on
@@ -566,6 +720,8 @@ function MentionsList({
       // this, items where someone edited an unrelated field jump above
       // items where you were actually @-mentioned.
       mentionSearchText={normalizeMentionName(effectiveName)}
+      filterQuery={filterQuery}
+      onClearFilter={onClearFilter}
     />
   )
 }
@@ -587,7 +743,9 @@ function MyWorkList({
   onOpen,
   emptyText,
   noteText,
-  mentionSearchText
+  mentionSearchText,
+  filterQuery,
+  onClearFilter
 }: {
   projectId: string
   wiql: string
@@ -595,6 +753,8 @@ function MyWorkList({
   emptyText: string
   noteText?: string
   mentionSearchText?: string
+  filterQuery: string
+  onClearFilter: () => void
 }): JSX.Element {
   const wiqlQ = useRunWiqlQuery(
     { projectId, wiql, top: MY_WORK_LIMIT },
@@ -684,6 +844,22 @@ function MyWorkList({
     return summaries
   }, [mentionsQ.data])
 
+  /**
+   * Client-side fuzzy filter applied AFTER ordering so we never reshuffle
+   * the user's expected sort. Building the searchable string per item is
+   * cheap (a few field reads + string concat) and only re-runs when
+   * `ordered`, `mentionByIdMemo`, or `filterQuery` change.
+   */
+  const filtered = useMemo(() => {
+    const q = filterQuery.trim()
+    if (!q) return ordered
+    return ordered.filter((item) =>
+      fuzzyMatches(q, buildSearchableText(item, mentionByIdMemo.get(item.id)))
+    )
+  }, [ordered, mentionByIdMemo, filterQuery])
+
+  const filterActive = filterQuery.trim().length > 0
+
   const loading = wiqlQ.isFetching || batchQ.isFetching
   const mentionsLoading = wantMentions && mentionsQ.isFetching
   const error =
@@ -725,7 +901,9 @@ function MyWorkList({
             }}
           >
             <Typography variant="caption" color="text.secondary">
-              {ordered.length} item{ordered.length === 1 ? '' : 's'}
+              {filterActive
+                ? `${filtered.length} of ${ordered.length} item${ordered.length === 1 ? '' : 's'}`
+                : `${ordered.length} item${ordered.length === 1 ? '' : 's'}`}
               {' · '}
               {wantMentions
                 ? mentionsQ.isFetching
@@ -763,53 +941,107 @@ function MyWorkList({
               </span>
             </Tooltip>
           </Stack>
-          <Box>
-            {ordered.map((item) => {
-              if (!wantMentions) {
+          {filterActive && filtered.length === 0 ? (
+            <Box sx={{ p: 4, textAlign: 'center' }}>
+              <Typography color="text.secondary" gutterBottom>
+                No items in this list match{' '}
+                <Box
+                  component="span"
+                  sx={{
+                    fontFamily: 'monospace',
+                    bgcolor: 'action.hover',
+                    px: 0.5,
+                    borderRadius: 0.5
+                  }}
+                >
+                  {filterQuery}
+                </Box>
+                .
+              </Typography>
+              <Button size="small" onClick={onClearFilter} sx={{ mt: 1 }}>
+                Clear filter
+              </Button>
+            </Box>
+          ) : (
+            <Box>
+              {filtered.map((item) => {
+                if (!wantMentions) {
+                  return (
+                    <WorkItemListRow
+                      key={item.id}
+                      item={item}
+                      onClick={onOpen}
+                    />
+                  )
+                }
+                const mention = mentionByIdMemo.get(item.id)
                 return (
                   <WorkItemListRow
                     key={item.id}
                     item={item}
                     onClick={onOpen}
+                    // Show the mention timestamp when known; otherwise
+                    // fall back to ChangedDate so the row still has *some*
+                    // recency cue. The tooltip prefix makes the source of
+                    // the timestamp explicit on hover.
+                    timestamp={
+                      mention
+                        ? { date: mention.date, tooltipPrefix: 'Mentioned' }
+                        : (() => {
+                            const changed = getChangedDate(item)
+                            return changed
+                              ? { date: changed, tooltipPrefix: 'Last updated' }
+                              : null
+                          })()
+                    }
+                    subtitle={
+                      mention ? (
+                        <MentionSnippet
+                          snippet={mention.snippet}
+                          author={mention.author}
+                        />
+                      ) : undefined
+                    }
                   />
                 )
-              }
-              const mention = mentionByIdMemo.get(item.id)
-              return (
-                <WorkItemListRow
-                  key={item.id}
-                  item={item}
-                  onClick={onOpen}
-                  // Show the mention timestamp when known; otherwise
-                  // fall back to ChangedDate so the row still has *some*
-                  // recency cue. The tooltip prefix makes the source of
-                  // the timestamp explicit on hover.
-                  timestamp={
-                    mention
-                      ? { date: mention.date, tooltipPrefix: 'Mentioned' }
-                      : (() => {
-                          const changed = getChangedDate(item)
-                          return changed
-                            ? { date: changed, tooltipPrefix: 'Last updated' }
-                            : null
-                        })()
-                  }
-                  subtitle={
-                    mention ? (
-                      <MentionSnippet
-                        snippet={mention.snippet}
-                        author={mention.author}
-                      />
-                    ) : undefined
-                  }
-                />
-              )
-            })}
-          </Box>
+              })}
+            </Box>
+          )}
         </>
       )}
     </Box>
   )
+}
+
+/**
+ * Builds the haystack string fed into `fuzzyMatches` for an Assigned /
+ * Mentions row. Indexes everything visible on the row PLUS a couple of
+ * non-rendered fields the user is likely to recall (id, type, tags) so a
+ * filter like "bug deploy" can land on a Bug-typed item titled "deploy
+ * pipeline regression" without ever having to expand the row.
+ *
+ * The `mention` argument is the resolved comment summary from the
+ * Mentions tab — when present we pull in the snippet and author so the
+ * filter can also match against quoted comment text.
+ */
+function buildSearchableText(
+  item: AdoWorkItem,
+  mention?: { snippet: string; author?: string }
+): string {
+  const parts: string[] = [
+    String(item.id),
+    `#${item.id}`,
+    getTitle(item),
+    getType(item),
+    getState(item),
+    getAssigneeName(item),
+    getTags(item).join(' ')
+  ]
+  if (mention) {
+    parts.push(mention.snippet)
+    if (mention.author) parts.push(mention.author)
+  }
+  return parts.filter(Boolean).join(' ')
 }
 
 /**
