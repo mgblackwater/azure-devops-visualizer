@@ -315,6 +315,31 @@ export interface AdoPullRequest {
   _links?: Record<string, { href?: string }>
 }
 
+/**
+ * One valid state for a given work-item type, as returned by ADO's
+ * `_apis/wit/workitemtypes/{type}/states` endpoint.
+ *
+ * `category` is the most useful field for UX — it groups states into
+ * coarse buckets (`Proposed` / `InProgress` / `Resolved` / `Completed`
+ * / `Removed`) that survive process customisation, so the UI can
+ * colour-code the popover entries even when an org has renamed the
+ * underlying state names. `color` is ADO's own per-state hex (no `#`
+ * prefix in the response) — currently unused by the renderer because
+ * the category-based palette gives a more consistent look across
+ * processes, but kept here for forward-compat.
+ */
+export interface AdoWorkItemTypeState {
+  name: string
+  color?: string
+  category?:
+    | 'Proposed'
+    | 'InProgress'
+    | 'Resolved'
+    | 'Completed'
+    | 'Removed'
+    | string
+}
+
 export interface IpcError {
   code:
     | 'NOT_AUTHENTICATED'

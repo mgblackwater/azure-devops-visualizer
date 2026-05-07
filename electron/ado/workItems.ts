@@ -3,7 +3,8 @@ import type {
   AdoComment,
   AdoJsonPatch,
   AdoWiqlResult,
-  AdoWorkItem
+  AdoWorkItem,
+  AdoWorkItemTypeState
 } from '@shared/adoTypes'
 
 const DEFAULT_FIELDS: readonly string[] = [
@@ -149,6 +150,76 @@ export async function patchWorkItem(args: {
     query: args.bypassRules ? { bypassRules: true } : undefined,
     cacheTtlMs: 0
   })
+}
+
+/**
+ * In-memory cache for `getWorkItemTypeStates`. ADO's state catalogue
+ * for a given (project, work-item-type) only changes when an admin
+ * customises the process — never within a normal session — so a
+ * 1-hour TTL is comfortably safe. Keyed on `${projectId}::${type}`
+ * because the same type name can resolve to different state lists
+ * across projects on customised orgs.
+ *
+ * Lives at module scope rather than going through `adoFetch`'s shared
+ * cache because the latter is keyed on full URL — fine, but this
+ * smaller dedicated map keeps the hot path zero-allocation and makes
+ * the TTL choice explicit at the call site.
+ */
+const TYPE_STATES_TTL_MS = 60 * 60 * 1000
+interface TypeStatesCacheEntry {
+  expiresAt: number
+  states: AdoWorkItemTypeState[]
+}
+const typeStatesCache = new Map<string, TypeStatesCacheEntry>()
+
+interface RawWorkItemTypeStatesResponse {
+  count?: number
+  value?: Array<{
+    name?: string
+    color?: string
+    category?: string
+  }>
+}
+
+/**
+ * Fetch the valid `System.State` values for a given work-item type
+ * inside a project. Used by the drawer's clickable state pill so the
+ * popover lists the *actually customisable* set of next states (e.g.
+ * a process that adds a "Triage" state shows up here even though it's
+ * not in any of our hard-coded fallbacks).
+ *
+ * Cached 1 hour per (project, type) — see `TYPE_STATES_TTL_MS`. The
+ * cache is intentionally not keyed off the work-item id; two items of
+ * the same type in the same project share the lookup.
+ */
+export async function getWorkItemTypeStates(args: {
+  projectId: string
+  workItemType: string
+}): Promise<{ states: AdoWorkItemTypeState[] }> {
+  const cacheKey = `${args.projectId}::${args.workItemType}`
+  const hit = typeStatesCache.get(cacheKey)
+  if (hit && hit.expiresAt > Date.now()) {
+    return { states: hit.states }
+  }
+  const data = await adoFetch<RawWorkItemTypeStatesResponse>({
+    method: 'GET',
+    path: `/${encodeURIComponent(args.projectId)}/_apis/wit/workitemtypes/${encodeURIComponent(
+      args.workItemType
+    )}/states`,
+    cacheTtlMs: 0 // we own the TTL via `typeStatesCache`
+  })
+  const states: AdoWorkItemTypeState[] = (data.value ?? [])
+    .filter((s) => typeof s.name === 'string' && s.name.length > 0)
+    .map((s) => ({
+      name: s.name as string,
+      color: s.color,
+      category: s.category as AdoWorkItemTypeState['category']
+    }))
+  typeStatesCache.set(cacheKey, {
+    expiresAt: Date.now() + TYPE_STATES_TTL_MS,
+    states
+  })
+  return { states }
 }
 
 interface CommentsResponse {

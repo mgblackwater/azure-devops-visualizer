@@ -20,6 +20,24 @@ interface AdoListResponse<T> {
  */
 const PROJECT_MEMBERS_TTL_MS = 60 * 60 * 1000
 const PROJECT_DEFAULT_TEAM_TTL_MS = 60 * 60 * 1000
+/**
+ * Project-wide tag list TTL. Five minutes is a deliberate compromise:
+ * fresh enough that a tag added via ADO web mid-session shows up in
+ * the suggester before the user gets confused, slow enough that
+ * opening the editor repeatedly within a session doesn't round-trip
+ * the network. The mutation that adds a tag also invalidates the
+ * RTK Query cache, so the same-window write→read cycle is instant.
+ */
+const PROJECT_TAGS_TTL_MS = 5 * 60 * 1000
+
+/**
+ * The tags endpoint is gated behind a `*-preview` API version on cloud
+ * DevOps as of 2026 — the modern `7.1` GA route returns 404 against
+ * most tenants. Pin the preview version explicitly so a future
+ * "default 7.x" bump in `client.ts` doesn't silently break tag
+ * suggestions.
+ */
+const PROJECT_TAGS_API_VERSION = '7.1-preview.1'
 
 export async function listProjects(opts?: {
   organizationUrl?: string
@@ -304,4 +322,58 @@ export async function listProjectMemberIdentities(
   return members.value
     .map((m) => m.identity)
     .filter((id): id is AdoIdentity => !!id && !!id.displayName)
+}
+
+/**
+ * One row in ADO's project-wide tag catalogue. We deliberately return
+ * just the names from `listProjectTags` — `id` / `url` / `active` are
+ * carried by the API but the suggester only needs the human label,
+ * and dropping the rest keeps the IPC payload small.
+ */
+interface AdoProjectTag {
+  id?: string
+  name?: string
+  url?: string
+  active?: boolean
+}
+
+/**
+ * Project-wide tag suggestions for the work-item drawer's tag editor.
+ *
+ * ADO maintains a single tags collection per project — every tag that
+ * has ever been applied to any work item shows up here, so this is the
+ * right input for an "add an existing tag" autocomplete. We:
+ *
+ *   - Strip empty names defensively (rare, but the API has been seen
+ *     to surface ghost rows after a bulk delete).
+ *   - Drop entries marked `active === false`. ADO sets that flag when
+ *     a tag has been deleted but the row hasn't been hard-deleted yet;
+ *     suggesting deleted tags would just add noise.
+ *   - De-duplicate case-insensitively (ADO tags are case-insensitive
+ *     on write but the catalogue can hold variants from old data).
+ *   - Sort alphabetically (case-insensitive) so the dropdown is
+ *     stable across calls.
+ */
+export async function listProjectTags(args: {
+  projectId: string
+}): Promise<{ tags: string[] }> {
+  const res = await adoFetch<AdoListResponse<AdoProjectTag>>({
+    method: 'GET',
+    path: `/${encodeURIComponent(args.projectId)}/_apis/wit/tags`,
+    apiVersion: PROJECT_TAGS_API_VERSION,
+    cacheTtlMs: PROJECT_TAGS_TTL_MS,
+    cacheKey: `projectTags:${args.projectId}`
+  })
+  const seen = new Map<string, string>()
+  for (const t of res.value ?? []) {
+    const name = (t.name ?? '').trim()
+    if (!name) continue
+    if (t.active === false) continue
+    const key = name.toLowerCase()
+    if (!seen.has(key)) seen.set(key, name)
+  }
+  const tags = [...seen.values()].sort((a, b) =>
+    a.localeCompare(b, undefined, { sensitivity: 'base' })
+  )
+  return { tags }
 }

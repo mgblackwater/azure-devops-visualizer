@@ -17,6 +17,7 @@ import {
 import {
   listIterations,
   listProjectMemberIdentities,
+  listProjectTags,
   searchIdentitiesByQuery,
   listProjects,
   listSavedQueries,
@@ -27,6 +28,7 @@ import {
   addComment,
   batchGetWorkItems,
   getLatestMentions,
+  getWorkItemTypeStates,
   getWorkItemWithRelations,
   listComments,
   patchWorkItem,
@@ -194,6 +196,18 @@ export function registerIpcHandlers(ipcMain: IpcMain): void {
 
     [IPC.WorkItemsPatch]: (_e, args) =>
       wrap(() => patchWorkItem(args as Parameters<typeof patchWorkItem>[0])),
+
+    [IPC.WorkItemTypeStates]: (_e, args) =>
+      wrap(() =>
+        getWorkItemTypeStates(
+          args as Parameters<typeof getWorkItemTypeStates>[0]
+        )
+      ),
+
+    [IPC.ProjectTagsList]: (_e, args) =>
+      wrap(() =>
+        listProjectTags(args as Parameters<typeof listProjectTags>[0])
+      ),
 
     [IPC.WorkItemsLatestMentions]: (_e, args) =>
       wrap(() =>
