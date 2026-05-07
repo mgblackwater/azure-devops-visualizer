@@ -7,6 +7,11 @@ directories:
 files:
   - out/**/*
   - package.json
+  # Tray icon PNGs (16+@2x, regular + Template variant for macOS).
+  # Resolved at runtime via `app.getAppPath()` / `electron/assets/...`
+  # so the same code path works in dev (project root) and in prod
+  # (asar root). See electron/notifications/tray.ts.
+  - electron/assets/**
 extraMetadata:
   main: out/main/main.js
 win:

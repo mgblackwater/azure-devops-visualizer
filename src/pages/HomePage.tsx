@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import {
   Alert,
   Autocomplete,
@@ -56,6 +57,29 @@ import {
 import { getChangedDate } from '@/utils/workItemFields'
 
 type MyWorkTab = 'assigned' | 'mentions' | 'favorites' | 'pullRequests'
+
+const VALID_TABS: readonly MyWorkTab[] = [
+  'assigned',
+  'mentions',
+  'favorites',
+  'pullRequests'
+]
+
+/**
+ * Read the active tab from the URL's `?tab=` parameter when present —
+ * powers deep-links from the tray menu and notification clicks
+ * (`'open-target'` payload). Falls back to `'assigned'` when missing
+ * or invalid so a hand-typed `/home?tab=garbage` doesn't crash the
+ * Tabs component.
+ */
+function tabFromSearch(search: string): MyWorkTab | null {
+  const params = new URLSearchParams(search)
+  const raw = params.get('tab')
+  if (!raw) return null
+  return (VALID_TABS as readonly string[]).includes(raw)
+    ? (raw as MyWorkTab)
+    : null
+}
 
 const MY_WORK_FIELDS = [
   'System.Id',
@@ -336,7 +360,35 @@ function MyWorkPanel({
   onRefetchIdentity: () => void
   onOpen: (id: number) => void
 }): JSX.Element {
-  const [tab, setTab] = useState<MyWorkTab>('assigned')
+  const navigate = useNavigate()
+  const location = useLocation()
+  // Tab is URL-driven so the `?tab=...` deep-link from the tray menu /
+  // notification click lands on the right pane. Local clicks update
+  // both the URL and component state via `setTab` so the back button
+  // walks tab history naturally.
+  const urlTab = tabFromSearch(location.search)
+  const [tab, setTabState] = useState<MyWorkTab>(urlTab ?? 'assigned')
+  useEffect(() => {
+    if (urlTab && urlTab !== tab) setTabState(urlTab)
+    // Intentionally skip `tab` from the deps — URL is the source of
+    // truth for cross-window deep-links; user clicks update both.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlTab])
+
+  function setTab(next: MyWorkTab): void {
+    setTabState(next)
+    const params = new URLSearchParams(location.search)
+    if (next === 'assigned') {
+      params.delete('tab')
+    } else {
+      params.set('tab', next)
+    }
+    const query = params.toString()
+    navigate(query ? `${location.pathname}?${query}` : location.pathname, {
+      replace: true
+    })
+  }
+
   const favoritesCount = useAppSelector(
     (s) => selectFavorites(s, orgUrl).length
   )

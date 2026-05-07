@@ -4,7 +4,7 @@ import { Box, CircularProgress } from '@mui/material'
 import { useGetConnectionQuery, useListProjectsQuery } from './store/api/adoApi'
 import { useAppDispatch, useAppSelector } from './store'
 import { selectDefaultProjectId } from './store/preferencesSlice'
-import { setProject } from './store/workspaceSlice'
+import { selectWorkItem, setProject } from './store/workspaceSlice'
 import { useWorkspacePersistence } from './hooks/useWorkspacePersistence'
 import AppLayout from './components/layout/AppLayout'
 import ConnectionPage from './pages/ConnectionPage'
@@ -37,6 +37,37 @@ export default function App(): JSX.Element {
     const off = window.ado.on('connection-changed', () => refetch())
     return off
   }, [refetch])
+
+  // Deep-link from a desktop notification click or a tray menu pick.
+  // We always navigate to /home and surface the right tab; opening the
+  // work-item drawer for `kind: 'workItem'` is best-effort and falls
+  // through silently if the project for that target isn't currently
+  // selected (the user can re-pick it). The brief explicitly says not
+  // to block the open on resolving project state — this matches that
+  // posture rather than queueing the action.
+  useEffect(() => {
+    const off = window.ado.on('open-target', (target) => {
+      if (target.kind === 'pr') {
+        navigate(`/home?tab=pullRequests&prId=${target.id}`, { replace: false })
+        return
+      }
+      if (target.kind === 'workItem') {
+        // Open the drawer immediately if the project matches what the
+        // user already has selected (the listing page will pick up the
+        // selection through workspace state). If it doesn't match,
+        // we still route to the Mentions tab so the user lands in the
+        // right place even when we can't auto-open the drawer.
+        navigate(`/home?tab=mentions`, { replace: false })
+        dispatch(selectWorkItem(target.id))
+        return
+      }
+      if (target.kind === 'tab') {
+        navigate(`/home?tab=${target.tab}`, { replace: false })
+        return
+      }
+    })
+    return off
+  }, [navigate, dispatch])
 
   useEffect(() => {
     if (isLoading) return
