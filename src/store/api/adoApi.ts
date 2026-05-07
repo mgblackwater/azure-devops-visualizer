@@ -7,6 +7,10 @@ import {
   IPC,
   type IpcArgs,
   type IpcChannel,
+  type ListPullRequestsArgs,
+  type ListPullRequestsResult,
+  type ListRepositoriesArgs,
+  type ListRepositoriesResult,
   type UpdateWikiPageResult
 } from '@shared/contract'
 import type {
@@ -96,7 +100,9 @@ export const adoApi = createApi({
     'WorkItems',
     'WorkItem',
     'Wikis',
-    'WikiPage'
+    'WikiPage',
+    'PullRequest',
+    'GitRepository'
   ],
   endpoints: (build) => ({
     getConnection: build.query<AdoConnectionInfo, void>({
@@ -385,6 +391,46 @@ export const adoApi = createApi({
     >({
       query: (args) => ({ channel: IPC.IdentitySearch, args }),
       keepUnusedDataFor: 60 * 60
+    }),
+
+    /**
+     * Live identity search across the org for the comment composer's
+     * `@`-mention picker. Results are de-duped and merged with recent
+     * contributors / project-members on the renderer side; this query
+     * deliberately doesn't sort or filter so the merge there is free
+     * to apply its own ordering.
+     */
+    searchIdentitiesByQuery: build.query<
+      { identities: AdoIdentity[]; queryEcho: string },
+      { projectId: string; query: string; top?: number }
+    >({
+      query: (args) => ({ channel: IPC.IdentitySearchByQuery, args }),
+      keepUnusedDataFor: 60
+    }),
+
+    /**
+     * Pull requests in a project, with optional status / Mine /
+     * Reviewer / repository filters applied server-side. The main
+     * process caches each unique filter combination briefly; the
+     * renderer cache adds an extra layer so toggling filter chips
+     * back-and-forth doesn't round-trip after the first hit.
+     */
+    listPullRequests: build.query<ListPullRequestsResult, ListPullRequestsArgs>({
+      query: (args) => ({ channel: IPC.PullRequestsList, args }),
+      providesTags: ['PullRequest'],
+      keepUnusedDataFor: 30
+    }),
+
+    /**
+     * Git repositories in a project. Powers the PR list's repo
+     * filter; cached aggressively (5 min) since repos change rarely
+     * and the dropdown wants to feel instant. Main-process cache
+     * matches the same TTL so a project switch + return is free.
+     */
+    listRepositories: build.query<ListRepositoriesResult, ListRepositoriesArgs>({
+      query: (args) => ({ channel: IPC.GitRepositoriesList, args }),
+      providesTags: ['GitRepository'],
+      keepUnusedDataFor: 300
     })
   })
 })
@@ -413,5 +459,8 @@ export const {
   useSearchWikiQuery,
   useUpdateWikiPageMutation,
   useAddWorkItemCommentMutation,
-  useGetProjectMembersQuery
+  useGetProjectMembersQuery,
+  useSearchIdentitiesByQueryQuery,
+  useListPullRequestsQuery,
+  useListRepositoriesQuery
 } = adoApi

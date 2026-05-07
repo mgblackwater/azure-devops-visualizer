@@ -12,6 +12,7 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
+  Divider,
   IconButton,
   InputAdornment,
   Skeleton,
@@ -33,6 +34,9 @@ import FolderOpenIcon from '@mui/icons-material/FolderOpen'
 import TableChartOutlinedIcon from '@mui/icons-material/TableChartOutlined'
 import VisibilityOutlinedIcon from '@mui/icons-material/VisibilityOutlined'
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
+import VerticalSplitOutlinedIcon from '@mui/icons-material/VerticalSplitOutlined'
+import CodeOutlinedIcon from '@mui/icons-material/CodeOutlined'
+import RemoveRedEyeOutlinedIcon from '@mui/icons-material/RemoveRedEyeOutlined'
 import DOMPurify from 'dompurify'
 import CodeMirror, { type ReactCodeMirrorRef } from '@uiw/react-codemirror'
 import { markdown as cmMarkdown } from '@codemirror/lang-markdown'
@@ -57,7 +61,8 @@ import FavoriteButton from '@/components/common/FavoriteButton'
 import {
   appendTableToPage,
   insertAtCursor,
-  replaceTableInPage
+  replaceTableInPage,
+  replaceTableInPageByContent
 } from '@/components/wiki/wikiSourceUtils'
 
 const SIDEBAR_WIDTH = 320
@@ -722,10 +727,26 @@ function renderHighlightedLabel(
  * inserted at the CodeMirror cursor and the buffer is marked dirty,
  * but no IPC fires until the user clicks Save.
  */
+/**
+ * `'append'` and `'replace'` are view-mode flows: the dialog Save
+ * commits straight to the wiki via the `updateWikiPage` mutation.
+ *
+ * `'cursor'` is the Edit-mode "Add table" path: the new markdown is
+ * inserted at the CodeMirror cursor and the buffer is marked dirty,
+ * but no IPC fires until the user clicks Save.
+ *
+ * `'replaceInBuffer'` is the Edit-mode "Edit table" path. It splices
+ * the editor buffer using a content-based lookup (the table's verbatim
+ * `rawMarkdown`), so the splice survives any small edits the user
+ * made elsewhere in the source between opening the dialog and saving.
+ * Like `'cursor'`, it doesn't write to the wiki — the user commits via
+ * the toolbar Save.
+ */
 type TableDialogTarget =
   | { kind: 'append' }
   | { kind: 'replace'; startLine: number; endLine: number }
   | { kind: 'cursor' }
+  | { kind: 'replaceInBuffer'; original: string }
 
 interface ConflictState {
   /** Content the user tried to commit when the 412 came back. */
@@ -780,6 +801,27 @@ function WikiPagePane({
   // "Add table" without forcing a focus-track + offset state branch.
   const cmRef = useRef<ReactCodeMirrorRef | null>(null)
 
+  // Edit-mode pane layout. Default is a side-by-side split so the user
+  // sees their rendered output while typing — editing markdown blind
+  // is genuinely painful for anything beyond a one-liner. The
+  // source/preview-only modes exist for narrow screens and for diagram-
+  // heavy pages where the preview is too noisy to live next to the
+  // editor.
+  const [editorLayout, setEditorLayout] = useState<
+    'split' | 'source' | 'preview'
+  >('split')
+
+  // Debounced mirror of `editorContent` that drives the preview pane.
+  // MarkdownView is heavy (mermaid, image proxying, work-item-ref
+  // batch query) — re-rendering it on every keystroke would stutter
+  // even on small pages. Sub-300ms feels effectively live without
+  // saturating the main thread.
+  const [previewSource, setPreviewSource] = useState<string>('')
+  useEffect(() => {
+    const t = window.setTimeout(() => setPreviewSource(editorContent), 250)
+    return () => window.clearTimeout(t)
+  }, [editorContent])
+
   // Table-builder dialog state. `target` describes what should happen
   // when the user clicks the dialog's Save button — see TableDialogTarget.
   const [tableBuilderOpen, setTableBuilderOpen] = useState(false)
@@ -816,6 +858,11 @@ function WikiPagePane({
     const seed = pageQ.data?.content ?? ''
     setEditorContent(seed)
     setEditorBaseline(seed)
+    // Skip the 250ms debounce on entry so the preview is already
+    // populated when the split view first paints — otherwise the
+    // user sees a blank pane for a quarter-second while the timer
+    // fires.
+    setPreviewSource(seed)
     setSaveError(null)
     setMode('edit')
   }
@@ -836,21 +883,32 @@ function WikiPagePane({
   }
 
   function handleEditTableClick(table: WikiMarkdownTable): void {
-    // Edit-table affordance only appears in view mode (we don't pass
-    // `onEditTable` into MarkdownView while editing), so we don't need
-    // a defensive mode check — but we still pin the splice range to
-    // the current parse to avoid drift if the cache shifts between
-    // the click and the dialog Save.
     setTableInitialData({
       cells: table.cells,
       alignments: table.alignments,
       headerRow: table.headerRow
     })
-    setTableTarget({
-      kind: 'replace',
-      startLine: table.startLine,
-      endLine: table.endLine
-    })
+    if (mode === 'edit') {
+      // Edit-mode flow: splice into the live buffer using the table's
+      // verbatim source. Anchoring on content rather than line index
+      // is important here because the preview is a debounced mirror
+      // of the editor — by the time the user clicks Save, the live
+      // buffer's line numbers may not match the parse anymore.
+      setTableTarget({
+        kind: 'replaceInBuffer',
+        original: table.rawMarkdown
+      })
+    } else {
+      // View-mode flow: line-based splice over the cached page content,
+      // then auto-commit via the wiki PUT. The cached content is the
+      // same string the table was parsed from, so the indices line up
+      // exactly.
+      setTableTarget({
+        kind: 'replace',
+        startLine: table.startLine,
+        endLine: table.endLine
+      })
+    }
     setTableBuilderOpen(true)
   }
 
@@ -908,6 +966,26 @@ function WikiPagePane({
       const next = insertAtCursor(editorContent, offset, markdown)
       setEditorContent(next)
       // Resolved → dialog closes itself.
+      return
+    }
+    if (target.kind === 'replaceInBuffer') {
+      // Edit mode: content-anchored splice into the live buffer. If
+      // the user has typed inside the table region between opening
+      // the dialog and saving, the original `rawMarkdown` won't be
+      // found — surface that as a thrown error so the dialog's
+      // inline alert renders, and leave the dialog open so the user
+      // can copy their work out manually.
+      const { result, replaced } = replaceTableInPageByContent(
+        editorContent,
+        target.original,
+        markdown
+      )
+      if (!replaced) {
+        throw new Error(
+          'The original table is no longer in the editor — close this dialog, find the table in the source, and replace it manually.'
+        )
+      }
+      setEditorContent(result)
       return
     }
     if (target.kind === 'append') {
@@ -1040,9 +1118,11 @@ function WikiPagePane({
   const tableBuilderSaveLabel =
     tableTarget.kind === 'cursor'
       ? 'Insert at cursor'
-      : tableTarget.kind === 'replace'
-        ? 'Save to wiki'
-        : 'Add to page'
+      : tableTarget.kind === 'replaceInBuffer'
+        ? 'Replace in editor'
+        : tableTarget.kind === 'replace'
+          ? 'Save to wiki'
+          : 'Add to page'
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -1175,6 +1255,37 @@ function WikiPagePane({
           </span>
         </Tooltip>
         {mode === 'edit' && (
+          <ToggleButtonGroup
+            size="small"
+            exclusive
+            value={editorLayout}
+            onChange={(_e, value) => {
+              // MUI fires `null` when the user clicks the already-
+              // active button — treat that as a no-op rather than
+              // letting the layout collapse to an undefined state.
+              if (value) setEditorLayout(value)
+            }}
+            aria-label="Editor layout"
+            sx={{ height: 30 }}
+          >
+            <ToggleButton value="source" aria-label="Source only">
+              <Tooltip title="Source only">
+                <CodeOutlinedIcon fontSize="small" />
+              </Tooltip>
+            </ToggleButton>
+            <ToggleButton value="split" aria-label="Split view">
+              <Tooltip title="Split view (source + preview)">
+                <VerticalSplitOutlinedIcon fontSize="small" />
+              </Tooltip>
+            </ToggleButton>
+            <ToggleButton value="preview" aria-label="Preview only">
+              <Tooltip title="Preview only">
+                <RemoveRedEyeOutlinedIcon fontSize="small" />
+              </Tooltip>
+            </ToggleButton>
+          </ToggleButtonGroup>
+        )}
+        {mode === 'edit' && (
           <Tooltip
             title={
               dirty
@@ -1285,7 +1396,14 @@ function WikiPagePane({
           />
         )}
         {!pageQ.isLoading && !errorMessage && mode === 'edit' && (
-          <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <Box
+            sx={{
+              display: 'flex',
+              flexDirection: 'column',
+              minHeight: 0,
+              height: '100%'
+            }}
+          >
             {saveError && (
               <Alert
                 severity="error"
@@ -1299,6 +1417,8 @@ function WikiPagePane({
               sx={{
                 flex: 1,
                 minHeight: 0,
+                display: 'flex',
+                flexDirection: 'row',
                 // CodeMirror has its own scrolling; fill the pane
                 // edge-to-edge so the editor visually replaces the
                 // rendered preview without an awkward inset.
@@ -1312,22 +1432,69 @@ function WikiPagePane({
                 }
               }}
             >
-              <CodeMirror
-                ref={cmRef}
-                value={editorContent}
-                onChange={(value) => setEditorContent(value)}
-                height="100%"
-                theme={isDark ? oneDark : undefined}
-                extensions={[cmMarkdown(), EditorView.lineWrapping]}
-                basicSetup={{
-                  lineNumbers: true,
-                  highlightActiveLine: true,
-                  foldGutter: false,
-                  bracketMatching: true,
-                  autocompletion: false,
-                  highlightSelectionMatches: false
-                }}
-              />
+              {editorLayout !== 'preview' && (
+                <Box
+                  sx={{
+                    flex: 1,
+                    minWidth: 0,
+                    minHeight: 0,
+                    display: 'flex',
+                    flexDirection: 'column'
+                  }}
+                >
+                  <CodeMirror
+                    ref={cmRef}
+                    value={editorContent}
+                    onChange={(value) => setEditorContent(value)}
+                    height="100%"
+                    theme={isDark ? oneDark : undefined}
+                    extensions={[cmMarkdown(), EditorView.lineWrapping]}
+                    basicSetup={{
+                      lineNumbers: true,
+                      highlightActiveLine: true,
+                      foldGutter: false,
+                      bracketMatching: true,
+                      autocompletion: false,
+                      highlightSelectionMatches: false
+                    }}
+                  />
+                </Box>
+              )}
+              {editorLayout === 'split' && (
+                <Divider orientation="vertical" flexItem />
+              )}
+              {editorLayout !== 'source' && (
+                <Box
+                  sx={{
+                    flex: 1,
+                    minWidth: 0,
+                    minHeight: 0,
+                    overflow: 'auto',
+                    p: 3,
+                    // Visual cue that this side is read-only output, not
+                    // an editable surface — slightly muted background
+                    // separates it from the editor without going as
+                    // heavy as a full panel border.
+                    bgcolor: isDark
+                      ? 'rgba(255,255,255,0.02)'
+                      : 'rgba(0,0,0,0.015)'
+                  }}
+                >
+                  <MarkdownView
+                    markdown={previewSource}
+                    wikiId={wikiId}
+                    wikiName={wikiName}
+                    projectId={projectId}
+                    wikiRepositoryId={wikiRepositoryId}
+                    currentPagePath={path}
+                    // Edit-mode click splices the editor buffer
+                    // (no auto-save) — see `handleEditTableClick`.
+                    // The user still controls when changes commit
+                    // via the toolbar Save button.
+                    onEditTable={handleEditTableClick}
+                  />
+                </Box>
+              )}
             </Box>
           </Box>
         )}

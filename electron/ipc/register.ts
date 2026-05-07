@@ -17,6 +17,7 @@ import {
 import {
   listIterations,
   listProjectMemberIdentities,
+  searchIdentitiesByQuery,
   listProjects,
   listSavedQueries,
   listTeamMembers,
@@ -40,6 +41,8 @@ import {
   searchWiki,
   updatePage as updateWikiPage
 } from '../ado/wiki'
+import { listPullRequests, listRepositories } from '../ado/pullRequests'
+import { read as readPreferences, writeSlice as writePreferencesSlice } from '../persistence/preferencesStore'
 
 type Handler = (...args: unknown[]) => Promise<unknown> | unknown
 
@@ -230,6 +233,33 @@ export function registerIpcHandlers(ipcMain: IpcMain): void {
       }))
     },
 
+    [IPC.IdentitySearchByQuery]: (_e, args) => {
+      const a = args as { projectId: string; query: string; top?: number }
+      return wrap(() =>
+        searchIdentitiesByQuery({
+          projectId: a.projectId,
+          query: a.query,
+          top: a.top
+        })
+      )
+    },
+
+    [IPC.GitRepositoriesList]: (_e, args) =>
+      wrap(() => listRepositories(args as Parameters<typeof listRepositories>[0])),
+
+    [IPC.PullRequestsList]: (_e, args) =>
+      wrap(() => listPullRequests(args as Parameters<typeof listPullRequests>[0])),
+
+    [IPC.PreferencesRead]: () =>
+      wrap(() => ({ data: readPreferences() })),
+
+    [IPC.PreferencesWrite]: (_e, args) =>
+      wrap(() => {
+        const a = args as { sliceName: string; sliceState: unknown }
+        writePreferencesSlice(a.sliceName, a.sliceState)
+        return { ok: true as const }
+      }),
+
     [IPC.ShellOpenExternal]: (_e, args) =>
       wrap(async () => {
         const { url } = args as { url: string }
@@ -250,6 +280,26 @@ export function registerIpcHandlers(ipcMain: IpcMain): void {
     if (!handler) continue
     ipcMain.handle(channel, handler as Handler)
   }
+
+  // Synchronous IPC — the only place we use it. The renderer-side
+  // Redux slice initializers (`preferencesSlice`, `recentSearchesSlice`,
+  // `favoritesSlice`) hydrate at module-import time and previously read
+  // from `localStorage` synchronously. To preserve that simple sync
+  // shape after migrating to a disk-backed file, the renderer calls
+  // `ipcRenderer.sendSync(IPC.PreferencesReadSync)` which lands here
+  // and returns the entire blob via `event.returnValue`.
+  // Registered with `ipcMain.on` (NOT `ipcMain.handle`) so the call
+  // really is synchronous on both sides.
+  ipcMain.on(IPC.PreferencesReadSync, (event) => {
+    try {
+      event.returnValue = { data: readPreferences() }
+    } catch (err) {
+      // We never want to crash the renderer's slice init — surface
+      // an empty store and let the slices fall back to defaults.
+      console.warn('[persistence] sync read failed', err)
+      event.returnValue = { data: {} }
+    }
+  })
 }
 
 export function broadcast(

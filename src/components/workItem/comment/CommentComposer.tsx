@@ -156,7 +156,12 @@ export default function CommentComposer({
   const [addComment, addState] = useAddWorkItemCommentMutation()
   const submitting = addState.isLoading
 
-  const { allItems, loading: mentionsLoading, filterItems } = useMentionSuggestions({
+  const {
+    allItems,
+    loading: mentionsLoading,
+    filterItems,
+    setQuery: setMentionQuery
+  } = useMentionSuggestions({
     projectId,
     workItem,
     comments
@@ -170,11 +175,21 @@ export default function CommentComposer({
   filterItemsRef.current = filterItems
   const mentionsLoadingRef = useRef(mentionsLoading)
   mentionsLoadingRef.current = mentionsLoading
+  const setMentionQueryRef = useRef(setMentionQuery)
+  setMentionQueryRef.current = setMentionQuery
   // `allItems` ref isn't strictly necessary because filterItems already
   // closes over allItems, but having the latest snapshot around is
   // useful for the `loading` heuristic in the popup component.
   const allItemsRef = useRef<MentionItem[]>(allItems)
   allItemsRef.current = allItems
+
+  // Live handle to the active mention popup so a React effect can
+  // push fresh items into it when the debounced server search returns
+  // *after* the user has stopped typing. Without this, the popup
+  // would freeze with stale static-only matches and only refresh on
+  // the next keystroke — exactly the symptom that made it look like
+  // project members were missing.
+  const popupHandleRef = useRef<MentionPopupHandle | null>(null)
 
   const workItemIdRef = useRef<number | undefined>(workItem?.id)
   workItemIdRef.current = workItem?.id
@@ -204,7 +219,12 @@ export default function CommentComposer({
           // submit, so this only affects the editor's local view.
           class: 'mention'
         },
-        suggestion: buildMentionSuggestion(filterItemsRef, mentionsLoadingRef)
+        suggestion: buildMentionSuggestion(
+          filterItemsRef,
+          mentionsLoadingRef,
+          setMentionQueryRef,
+          popupHandleRef
+        )
       })
     ],
     immediatelyRender: true,
@@ -270,6 +290,18 @@ export default function CommentComposer({
     if (!editor) return
     editor.setEditable(!submitting)
   }, [editor, submitting])
+
+  // When the server-side identity search delivers new results (or the
+  // static project-members list arrives), push them into the active
+  // popup directly. The Mention extension's `items()` only re-runs
+  // on editor mutations — without this nudge, results that arrive
+  // after the user has stopped typing would stay invisible until
+  // they pressed another key.
+  useEffect(() => {
+    const handle = popupHandleRef.current
+    if (!handle) return
+    handle.refresh()
+  }, [allItems, mentionsLoading])
 
   const submitDisabled = submitting || isEmpty || !workItem
 
@@ -472,22 +504,49 @@ function promptForLink(editor: Editor): void {
 }
 
 /**
+ * Imperative handle the React side of the composer holds onto so it
+ * can refresh the active popup when async data (live identity search,
+ * static members fetch) arrives *after* the user has stopped typing.
+ *
+ * Without this, the popup would only ever rebuild via TipTap's
+ * suggestion plugin's own update cycle — which fires on editor
+ * mutations, not on external React state changes — and freshly-arrived
+ * results would be invisible until the user pressed another key.
+ */
+interface MentionPopupHandle {
+  /** Push the latest items + loading state into the rendered popup. */
+  refresh(): void
+}
+
+/**
  * Wire the Mention extension's suggestion API into our React-rendered
  * `MentionList` popup. Returns the `suggestion` config object directly
  * — we live with the loose `any`-shaped TipTap typings inside the
  * helper so the rest of the file can stay strict.
  *
- * The two refs let the suggestion plugin read the latest filter
- * function and loading state without re-creating the editor on every
- * render.
+ * The refs let the suggestion plugin read the latest filter function,
+ * loading state, and query-setter without re-creating the editor on
+ * every render. `popupHandleRef` is written by `onStart` / cleared by
+ * `onExit` so the React side can call `refresh()` when async data
+ * arrives.
  */
 function buildMentionSuggestion(
   filterItemsRef: React.MutableRefObject<(query: string) => MentionItem[]>,
-  loadingRef: React.MutableRefObject<boolean>
+  loadingRef: React.MutableRefObject<boolean>,
+  setQueryRef: React.MutableRefObject<(query: string) => void>,
+  popupHandleRef: React.MutableRefObject<MentionPopupHandle | null>
 ): NonNullable<Parameters<typeof Mention.configure>[0]>['suggestion'] {
   return {
     char: '@',
-    items: ({ query }) => filterItemsRef.current(query),
+    items: ({ query }) => {
+      // Push the live query into the React hook so the debounced
+      // server-side identity search can fire. Deferred to a
+      // microtask because `items()` runs from inside ProseMirror's
+      // plugin update path; setting React state directly there
+      // would warn about updating during render of another tree.
+      queueMicrotask(() => setQueryRef.current(query))
+      return filterItemsRef.current(query)
+    },
     // The suggestion plugin's `command` is what the picker calls to
     // commit the selection — it inserts the mention node and replaces
     // the trigger range. We pre-shape the `id` and `label` because
@@ -513,6 +572,13 @@ function buildMentionSuggestion(
     render: () => {
       let component: ReactRenderer<MentionListHandle> | null = null
       let popup: TippyInstance[] | null = null
+      // Latest values needed to rebuild props from the React side
+      // without going through TipTap's `items()` (which only fires
+      // on editor mutations).
+      let lastCommand:
+        | SuggestionProps<MentionItem, MentionItem>['command']
+        | null = null
+      let lastQuery = ''
 
       function getRect(props: SuggestionProps<MentionItem, MentionItem>): (() => DOMRect) | null {
         if (!props.clientRect) return null
@@ -526,8 +592,20 @@ function buildMentionSuggestion(
         }
       }
 
+      function pushCurrentProps(): void {
+        if (!component || !lastCommand) return
+        const items = filterItemsRef.current(lastQuery)
+        component.updateProps({
+          items,
+          loading: loadingRef.current && items.length === 0,
+          command: lastCommand
+        })
+      }
+
       return {
         onStart: (props: SuggestionProps<MentionItem, MentionItem>) => {
+          lastCommand = props.command
+          lastQuery = props.query
           component = new ReactRenderer(MentionList, {
             props: {
               items: props.items,
@@ -536,6 +614,12 @@ function buildMentionSuggestion(
             },
             editor: props.editor
           })
+          // Expose a refresh handle so the React composer can push
+          // newly-arrived async results into this popup without
+          // waiting for the user's next keystroke.
+          popupHandleRef.current = {
+            refresh: pushCurrentProps
+          }
           if (!props.clientRect) return
           const rect = getRect(props)
           if (!rect) return
@@ -559,6 +643,8 @@ function buildMentionSuggestion(
           })
         },
         onUpdate: (props: SuggestionProps<MentionItem, MentionItem>) => {
+          lastCommand = props.command
+          lastQuery = props.query
           component?.updateProps({
             items: props.items,
             loading: loadingRef.current && props.items.length === 0,
@@ -576,6 +662,9 @@ function buildMentionSuggestion(
           return component?.ref?.onKeyDown(props) ?? false
         },
         onExit: () => {
+          popupHandleRef.current = null
+          lastCommand = null
+          lastQuery = ''
           popup?.[0].destroy()
           component?.destroy()
           popup = null

@@ -9,10 +9,12 @@ import type {
   AdoComment,
   AdoConnectionInfo,
   AdoConnectionInput,
+  AdoGitRepository,
   AdoIdentity,
   AdoIteration,
   AdoJsonPatch,
   AdoProject,
+  AdoPullRequest,
   AdoSavedQuery,
   AdoTeam,
   AdoTeamMember,
@@ -115,14 +117,74 @@ export const IPC = {
    * and lifts its members; the renderer merges in recent contributors
    * from the work item's existing comment history client-side, so this
    * channel intentionally returns just the project's broad member list
-   * rather than per-work-item participants.
+   * rather than per-work-item participants. Used to seed the picker
+   * before the user has typed anything.
    */
   IdentitySearch: 'identity.search',
+
+  /**
+   * Live identity search across the org, scoped by the project. Backed
+   * by ADO's `IdentityPicker/Identities` endpoint — the same one
+   * ADO web uses for its own `@`-mention popups. The picker calls this
+   * (debounced) every time the user types after `@`, so the result
+   * set isn't limited to the default team's roster.
+   */
+  IdentitySearchByQuery: 'identity.searchByQuery',
+
+  /**
+   * List git repositories in a project. Used by the PR list's repo
+   * filter. ADO also exposes per-repo branch / refs endpoints under
+   * the same `_apis/git/repositories/...` prefix; we deliberately
+   * stop at the project-level list here — additional surface lands
+   * with phase-2 features.
+   */
+  GitRepositoriesList: 'git.repositories.list',
+
+  /**
+   * List pull requests in a project, with optional status / creator /
+   * reviewer / repository filters. Backed by ADO's
+   * `_apis/git/pullrequests` (project-wide) or
+   * `_apis/git/repositories/{repo}/pullrequests` (repo-scoped) — see
+   * `ListPullRequestsArgs.repositoryId` for the toggle.
+   */
+  PullRequestsList: 'pullRequests.list',
+
+  /**
+   * Async read of the entire preferences blob — kept for symmetry /
+   * future use, but the slice init path actually uses
+   * `PreferencesReadSync` (see below) so the renderer can hydrate
+   * synchronously at module-load time. The async variant is the one
+   * registered via `ipcMain.handle`.
+   */
+  PreferencesRead: 'preferences.read',
+  /**
+   * Synchronous read of the entire preferences blob. Registered with
+   * `ipcMain.on` (NOT `ipcMain.handle`) so the renderer's slice
+   * initializers can call it via `ipcRenderer.sendSync` and stay
+   * synchronous — the only place in this app where sync IPC is
+   * appropriate. See `electron/preload.ts` for the rationale.
+   */
+  PreferencesReadSync: 'preferences.read.sync',
+  /**
+   * Per-slice preferences write. The main process replaces only the
+   * named slice key in the on-disk JSON blob and atomically rewrites
+   * the file, so a write to one slice never rolls back another's
+   * concurrent change. Fire-and-forget from the renderer's POV.
+   */
+  PreferencesWrite: 'preferences.write',
 
   ShellOpenExternal: 'shell.openExternal'
 } as const
 
-export type IpcChannel = (typeof IPC)[keyof typeof IPC]
+/**
+ * Union of every async-invoke channel name. Derived from `IpcSignatures`
+ * (NOT from `typeof IPC` directly) so any sync-only channels like
+ * `IPC.PreferencesReadSync` — which travel via `ipcRenderer.sendSync`
+ * and intentionally aren't part of the typed `invoke` map — are
+ * excluded. This keeps `bridge.invoke(channel, args)` from compiling
+ * for channels that wouldn't actually work over `invoke`.
+ */
+export type IpcChannel = keyof IpcSignatures
 
 /* ---------- request payload types ---------- */
 
@@ -340,6 +402,85 @@ export interface IdentitySearchResult {
   identities: AdoIdentity[]
 }
 
+export interface IdentitySearchByQueryArgs {
+  /** Org-wide search; project context only used for cache scoping. */
+  projectId: string
+  /** Free-text query the user typed after `@`. */
+  query: string
+  /** Hard cap on results returned (default 25). */
+  top?: number
+}
+
+export interface ListPullRequestsArgs {
+  projectId: string
+  /**
+   * Defaults to `'active'` server-side. `'all'` returns active +
+   * completed + abandoned; useful for the "All" status segment in the
+   * UI without three separate fetches.
+   */
+  status?: 'active' | 'completed' | 'abandoned' | 'all'
+  /** ADO identity id (GUID) — server-side `searchCriteria.creatorId`. */
+  creatorId?: string
+  /** ADO identity id (GUID) — server-side `searchCriteria.reviewerId`. */
+  reviewerId?: string
+  /**
+   * When set, the main process hits the *repo-scoped* endpoint
+   * (`/_apis/git/repositories/{id}/pullrequests`) instead of the
+   * project-wide one. ADO's project-wide endpoint does not accept
+   * `searchCriteria.repositoryId`, so this toggle is the right way
+   * to filter by a single repository.
+   */
+  repositoryId?: string
+  /** Cap returned rows. Default 100. */
+  top?: number
+}
+
+export interface ListPullRequestsResult {
+  pullRequests: AdoPullRequest[]
+}
+
+export interface ListRepositoriesArgs {
+  projectId: string
+}
+
+export interface ListRepositoriesResult {
+  repositories: AdoGitRepository[]
+}
+
+/**
+ * Empty args for the preferences read channels. The store returns the
+ * entire blob in one shot — slices pick out their own key.
+ */
+export type ReadPreferencesArgs = void
+
+export interface ReadPreferencesResult {
+  /**
+   * Top-level keys are slice names (e.g. `preferences`,
+   * `recentSearches`, `favorites`); values are whatever each slice
+   * persisted. Renderers must treat unknown shapes defensively.
+   */
+  data: Record<string, unknown>
+}
+
+export interface WritePreferencesArgs {
+  sliceName: string
+  sliceState: unknown
+}
+
+export interface WritePreferencesResult {
+  ok: true
+}
+
+export interface IdentitySearchByQueryResult {
+  /** Raw identities as returned by ADO's IdentityPicker, mapped onto
+   *  `AdoIdentity`. The renderer is responsible for sorting / merging
+   *  with recent contributors and de-duping. */
+  identities: AdoIdentity[]
+  /** The query echo from ADO; useful for ignoring stale responses if
+   *  the user has typed past this query by the time it returns. */
+  queryEcho: string
+}
+
 /* ---------- channel signature map (request -> response) ---------- */
 
 export interface IpcSignatures {
@@ -390,6 +531,23 @@ export interface IpcSignatures {
     args: IdentitySearchArgs
     result: IdentitySearchResult
   }
+  [IPC.IdentitySearchByQuery]: {
+    args: IdentitySearchByQueryArgs
+    result: IdentitySearchByQueryResult
+  }
+
+  [IPC.GitRepositoriesList]: {
+    args: ListRepositoriesArgs
+    result: ListRepositoriesResult
+  }
+
+  [IPC.PullRequestsList]: {
+    args: ListPullRequestsArgs
+    result: ListPullRequestsResult
+  }
+
+  [IPC.PreferencesRead]: { args: ReadPreferencesArgs; result: ReadPreferencesResult }
+  [IPC.PreferencesWrite]: { args: WritePreferencesArgs; result: WritePreferencesResult }
 
   [IPC.ShellOpenExternal]: { args: ShellOpenExternalArgs; result: { ok: true } }
 }
@@ -399,10 +557,31 @@ export type IpcResult<C extends IpcChannel> = IpcSignatures[C]['result']
 
 /* ---------- bridge surface exposed on window ---------- */
 
+/**
+ * Synchronous-read + async-write surface over the disk-backed
+ * preferences store. The synchronous read is intentional and lets
+ * Redux slice initializers stay synchronous (matching the prior
+ * `localStorage`-based behaviour) — see `electron/preload.ts`.
+ */
+export interface PreferencesBridge {
+  /**
+   * Returns the entire preferences blob as a plain object. Callers
+   * pluck out their own slice key. Synchronous because slice
+   * `createSlice({ initialState: load() })` calls run at module import
+   * time and going async there would require restructuring every
+   * slice.
+   */
+  readSync(): ReadPreferencesResult
+  /** Persist a single slice's state. Fire-and-forget. */
+  write(sliceName: string, sliceState: unknown): Promise<WritePreferencesResult>
+}
+
 export interface AdoBridge {
   invoke<C extends IpcChannel>(channel: C, args?: IpcArgs<C>): Promise<IpcResult<C>>
   /** Listen for unsolicited events from main (e.g. token cleared). */
   on(event: 'connection-changed', handler: (info: AdoConnectionInfo) => void): () => void
+  /** Disk-backed preferences store; replaces localStorage for persisted state. */
+  preferences: PreferencesBridge
 }
 
 declare global {

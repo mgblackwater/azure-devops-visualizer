@@ -1,4 +1,4 @@
-import { adoFetch } from './client'
+import { adoFetch, AdoApiError } from './client'
 import type {
   AdoIdentity,
   AdoIteration,
@@ -109,6 +109,156 @@ async function getProjectDefaultTeamId(
     cacheKey: `project:${projectId}:withCapabilities`
   })
   return project.defaultTeam?.id
+}
+
+/**
+ * Live identity search via ADO's `IdentityPicker` endpoint — the same
+ * one that powers `@`-mention popups in ADO web. Returns identities
+ * matching `query` from the entire org (subject to PAT visibility),
+ * not just the default team's roster.
+ *
+ * Cached briefly per-(project,query,top): rapid keystrokes like
+ * `a` → `al` → `ali` → `al` should be served from cache on the
+ * back-step. We skip caching for an empty query — ADO returns nothing
+ * for that case anyway.
+ *
+ * On any non-network error we surface as an empty list rather than
+ * throw, so the composer falls back to its static project-members
+ * list and the user still sees suggestions.
+ */
+const IDENTITY_PICKER_TTL_MS = 60_000
+// IdentityPicker is one of the few ADO endpoints that never moved past
+// the 5.0 preview line — `7.x` returns 404 on cloud orgs, which used
+// to surface here as a silent empty result and made the `@`-mention
+// popup look like it was ignoring everyone outside the default team.
+// Pin the version explicitly; do not bump without re-verifying against
+// dev.azure.com.
+const IDENTITY_PICKER_API_VERSION = '5.0-preview.1'
+
+interface IdentityPickerIdentity {
+  displayName?: string
+  /** GUID — present on most identity types. */
+  entityId?: string
+  /** Per-collection local id; populated on cloud orgs that mirror the
+   *  AAD principal into the org's identity store. */
+  localId?: string
+  /** Origin (AAD) id — useful as a last-resort stable key for guest
+   *  identities the org has never materialised locally. */
+  originId?: string
+  /** ADO subject descriptor, e.g. `aad.NjUxOjk1ZjI...`. Required for
+   *  proper @mention notifications; falls back to entityId otherwise. */
+  subjectDescriptor?: string
+  mail?: string
+  signInAddress?: string
+  samAccountName?: string
+  image_url?: string
+  active?: boolean
+  /** Some org configurations return image url under `imageUrl` instead. */
+  imageUrl?: string
+}
+
+interface IdentityPickerResultGroup {
+  queryToken?: string
+  identities?: IdentityPickerIdentity[]
+}
+
+interface IdentityPickerResponse {
+  results?: IdentityPickerResultGroup[]
+}
+
+export async function searchIdentitiesByQuery(args: {
+  projectId: string
+  query: string
+  top?: number
+}): Promise<{ identities: AdoIdentity[]; queryEcho: string }> {
+  const trimmed = args.query.trim()
+  if (!trimmed) {
+    // ADO IdentityPicker rejects empty queries. The composer should
+    // be using `listProjectMemberIdentities` for the no-query state
+    // anyway; this guard just keeps the IPC contract honest.
+    return { identities: [], queryEcho: '' }
+  }
+  const top = Math.min(Math.max(args.top ?? 25, 1), 100)
+  try {
+    const res = await adoFetch<IdentityPickerResponse>({
+      method: 'POST',
+      // Org-scoped endpoint. ADO accepts a project segment for some
+      // identity APIs but IdentityPicker only resolves at the
+      // collection (org) level — adding a project prefix here causes
+      // a 404 on most cloud orgs.
+      path: '/_apis/IdentityPicker/Identities',
+      apiVersion: IDENTITY_PICKER_API_VERSION,
+      body: {
+        query: trimmed,
+        // Lowercase string literals are required — IdentityPicker's
+        // input validator is case-sensitive and silently treats
+        // `'User'` as a typo, returning an empty result group with
+        // HTTP 200.
+        identityTypes: ['user'],
+        // `ims` searches the org's identity store; `source` searches
+        // the directory backing the org (e.g. AAD). Both together
+        // matches what ADO web requests in the browser.
+        operationScopes: ['ims', 'source'],
+        options: {
+          // Some tenants return [] when `MinResults` exceeds the
+          // available match count, so we deliberately keep this at 1.
+          MinResults: 1,
+          MaxResults: top
+        },
+        properties: [
+          'DisplayName',
+          'SignInAddress',
+          'Mail',
+          'MailNickname',
+          'SamAccountName',
+          'SubjectDescriptor',
+          'Department',
+          'JobTitle',
+          'Active'
+        ]
+      },
+      cacheTtlMs: IDENTITY_PICKER_TTL_MS,
+      cacheKey: `identityPicker:${args.projectId}:${trimmed.toLowerCase()}:${top}`
+    })
+    const identities = (res.results ?? [])
+      .flatMap((g) => g.identities ?? [])
+      // Treat *missing* `active` as active. The filter is only there
+      // to drop deactivated/disabled accounts; identities returned
+      // without an `active` field at all are the common case for
+      // many tenants and must not be excluded.
+      .filter((i) => i.active !== false && !!i.displayName)
+      .map((i) => identityFromPicker(i))
+    return { identities, queryEcho: trimmed }
+  } catch (err) {
+    // Swallow so the composer still shows the static project-members
+    // list, but leave one quiet warning so a misconfigured PAT or a
+    // future API-version regression doesn't go completely dark.
+    console.warn(
+      '[ado/identityPicker] search failed:',
+      err instanceof Error ? err.message : String(err),
+      err instanceof AdoApiError
+        ? { status: err.status, code: err.code, details: err.details }
+        : undefined
+    )
+    return { identities: [], queryEcho: trimmed }
+  }
+}
+
+function identityFromPicker(p: IdentityPickerIdentity): AdoIdentity {
+  // Fall back through every plausible stable id the picker may have
+  // populated. On certain tenants (notably guest users that haven't
+  // been materialised into the org's identity store), `entityId` is
+  // missing and only `localId` / `originId` are set — dropping those
+  // rows would silently cut the search down to next-to-nothing.
+  const stableId =
+    p.entityId || p.localId || p.originId || p.subjectDescriptor || ''
+  return {
+    displayName: p.displayName ?? '',
+    uniqueName: p.mail || p.signInAddress || p.samAccountName,
+    id: stableId,
+    descriptor: p.subjectDescriptor,
+    imageUrl: p.image_url ?? p.imageUrl
+  }
 }
 
 /**

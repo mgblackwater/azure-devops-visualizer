@@ -24,6 +24,7 @@ import StarIcon from '@mui/icons-material/Star'
 import StarBorderIcon from '@mui/icons-material/StarBorder'
 import AssignmentIndIcon from '@mui/icons-material/AssignmentInd'
 import AlternateEmailIcon from '@mui/icons-material/AlternateEmail'
+import CallSplitIcon from '@mui/icons-material/CallSplit'
 import RefreshIcon from '@mui/icons-material/Refresh'
 import {
   useBatchGetWorkItemsQuery,
@@ -46,6 +47,7 @@ import {
 import { selectFavorites } from '@/store/favoritesSlice'
 import WorkItemListRow from '@/components/workItem/WorkItemListRow'
 import FavoritesTab from '@/components/favorites/FavoritesTab'
+import PullRequestsList from '@/components/pullRequests/PullRequestsList'
 import {
   buildAssignedToMeWiql,
   buildMentionsMeWiql,
@@ -53,7 +55,7 @@ import {
 } from '@/utils/wiql'
 import { getChangedDate } from '@/utils/workItemFields'
 
-type MyWorkTab = 'assigned' | 'mentions' | 'favorites'
+type MyWorkTab = 'assigned' | 'mentions' | 'favorites' | 'pullRequests'
 
 const MY_WORK_FIELDS = [
   'System.Id',
@@ -297,6 +299,7 @@ export default function HomePage(): JSX.Element {
             projectId={projectId}
             orgUrl={orgUrl}
             displayName={me?.displayName}
+            currentUserId={me?.id}
             identityLoading={connectionQ.isFetching}
             onRefetchIdentity={() => void connectionQ.refetch()}
             onOpen={(id) => dispatch(selectWorkItem(id))}
@@ -320,6 +323,7 @@ function MyWorkPanel({
   projectId,
   orgUrl,
   displayName,
+  currentUserId,
   identityLoading,
   onRefetchIdentity,
   onOpen
@@ -327,6 +331,7 @@ function MyWorkPanel({
   projectId: string | null
   orgUrl: string | undefined
   displayName: string | undefined
+  currentUserId: string | undefined
   identityLoading: boolean
   onRefetchIdentity: () => void
   onOpen: (id: number) => void
@@ -373,6 +378,12 @@ function MyWorkPanel({
             iconPosition="start"
           />
           <Tab
+            value="pullRequests"
+            label="Pull requests"
+            icon={<CallSplitIcon fontSize="small" />}
+            iconPosition="start"
+          />
+          <Tab
             value="favorites"
             icon={<StarIcon fontSize="small" />}
             iconPosition="start"
@@ -410,6 +421,16 @@ function MyWorkPanel({
             wiql={buildAssignedToMeWiql(MY_WORK_LIMIT)}
             onOpen={onOpen}
             emptyText="Nothing is assigned to you in this project."
+          />
+        ) : tab === 'pullRequests' ? (
+          <PullRequestsList
+            projectId={projectId}
+            orgUrl={orgUrl}
+            currentUserId={currentUserId}
+            // Phase 2 will switch this to opening the in-app PR detail
+            // drawer; for phase 1 the row click already routes through
+            // shell.openExternal inside the component.
+            onOpen={() => undefined}
           />
         ) : (
           <MentionsList

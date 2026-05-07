@@ -82,6 +82,44 @@ export function replaceTableInPage(
 }
 
 /**
+ * Content-based variant of `replaceTableInPage` — finds the first
+ * exact occurrence of `original` in `source` and substitutes it with
+ * `replacement`. Returns `{ replaced: false }` when no match is found
+ * so callers can degrade gracefully (e.g. surface an inline "table
+ * source has changed" warning) instead of silently corrupting the
+ * page.
+ *
+ * Why this exists: the line-based `replaceTableInPage` works perfectly
+ * when the source the table was parsed from is identical to the
+ * source the splice runs against. In edit mode the preview is fed by
+ * a debounced mirror of the live editor buffer, so the user can have
+ * typed anywhere in the buffer between opening the table dialog and
+ * clicking Save. Anchoring on content avoids that drift.
+ *
+ * Edge case: if the same table block appears verbatim more than once
+ * in the page, we only replace the first occurrence — the user is
+ * almost certainly editing a unique table, and refusing to act on a
+ * duplicate would be more surprising than just doing the obvious
+ * thing.
+ */
+export function replaceTableInPageByContent(
+  source: string,
+  original: string,
+  replacement: string,
+): { result: string; replaced: boolean } {
+  if (!original) return { result: source, replaced: false }
+  const idx = source.indexOf(original)
+  if (idx < 0) return { result: source, replaced: false }
+  // Trim trailing whitespace off the replacement so successive edits
+  // on the same table don't accumulate blank lines, mirroring what
+  // `replaceTableInPage` does.
+  const trimmedReplacement = replacement.replace(/\s+$/, '')
+  const next =
+    source.slice(0, idx) + trimmedReplacement + source.slice(idx + original.length)
+  return { result: next, replaced: true }
+}
+
+/**
  * Insert a table at a CodeMirror character offset, padding with blank
  * lines on either side if the cursor isn't already on a blank line.
  * Mirrors how a developer would naturally type a new table block:

@@ -1,10 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import {
+  IPC,
   IPC_ERROR_PREFIX,
   type AdoBridge,
   type IpcChannel,
   type IpcArgs,
-  type IpcResult
+  type IpcResult,
+  type ReadPreferencesResult,
+  type WritePreferencesResult
 } from '@shared/contract'
 import type { AdoConnectionInfo, IpcError } from '@shared/adoTypes'
 
@@ -49,6 +52,45 @@ const bridge: AdoBridge = {
       }
     }
     return () => {}
+  },
+  preferences: {
+    /**
+     * Synchronous read of the disk-backed preferences blob.
+     *
+     * This is the ONE place in the app where we use synchronous IPC
+     * (`ipcRenderer.sendSync`). The Redux slices that consume
+     * preferences hydrate at module-import time via
+     * `createSlice({ initialState: load() })`, which is synchronous —
+     * matching the previous `localStorage.getItem` shape. Going async
+     * here would require restructuring every slice to defer hydration
+     * until after a `Provider` mount, which is a much larger change
+     * for a thin wrapper around a small JSON file. Sync IPC is fast
+     * enough for a one-shot read at boot; we never call this on a
+     * hot path.
+     */
+    readSync(): ReadPreferencesResult {
+      try {
+        const result = ipcRenderer.sendSync(IPC.PreferencesReadSync) as ReadPreferencesResult
+        if (result && typeof result === 'object' && result.data && typeof result.data === 'object') {
+          return result
+        }
+      } catch {
+        // fall through
+      }
+      // Defensive default — if the main handler is missing or
+      // returned something unexpected, give the slices an empty
+      // store and let them fall back to their initial state.
+      return { data: {} }
+    },
+    write(sliceName, sliceState): Promise<WritePreferencesResult> {
+      return ipcRenderer.invoke(IPC.PreferencesWrite, { sliceName, sliceState }).then(
+        (data) => data as WritePreferencesResult,
+        (err: unknown) => {
+          // eslint-disable-next-line @typescript-eslint/no-throw-literal
+          throw decodeIpcError(err)
+        }
+      )
+    }
   }
 }
 

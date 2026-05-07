@@ -1,12 +1,18 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
+import { persistSlice, readPersistedSlice } from './persistenceBridge'
 
 /**
  * Persisted "recent work item searches", scoped per ADO project so that
  * switching projects doesn't pollute the dropdown with cross-project IDs.
  *
- * State is rehydrated from localStorage on first load and written back on
- * every reducer mutation. Cap is per-project so users with multiple projects
+ * State is rehydrated from the disk-backed preferences store
+ * (`{userData}/preferences.json`) on first load and written back on every
+ * reducer mutation. Cap is per-project so users with multiple projects
  * keep meaningful history in each one.
+ *
+ * The legacy `localStorage` key is still consulted exactly once via
+ * `persistenceBridge.readPersistedSlice` to migrate prior installs onto
+ * the new file. Nothing else here touches localStorage.
  */
 
 export interface RecentSearch {
@@ -22,43 +28,39 @@ export interface RecentSearchesState {
 }
 
 const MAX_PER_PROJECT = 10
-const STORAGE_KEY = 'ado-viz:recentSearches:v1'
+const LEGACY_STORAGE_KEY = 'ado-viz:recentSearches:v1'
+const SLICE_NAME = 'recentSearches'
+
+function sanitizeState(parsed: unknown): RecentSearchesState {
+  if (!parsed || typeof parsed !== 'object') return { byProject: {} }
+  const p = parsed as Partial<RecentSearchesState>
+  if (!p.byProject || typeof p.byProject !== 'object') return { byProject: {} }
+  const out: RecentSearchesState = { byProject: {} }
+  for (const [projectId, list] of Object.entries(p.byProject)) {
+    if (!Array.isArray(list)) continue
+    out.byProject[projectId] = list
+      .filter((e): e is RecentSearch => !!e && typeof e.id === 'number')
+      .map((e) => ({
+        id: e.id,
+        title: typeof e.title === 'string' ? e.title : undefined,
+        type: typeof e.type === 'string' ? e.type : undefined,
+        ts: typeof e.ts === 'number' ? e.ts : Date.now()
+      }))
+      .slice(0, MAX_PER_PROJECT)
+  }
+  return out
+}
 
 function load(): RecentSearchesState {
-  if (typeof localStorage === 'undefined') return { byProject: {} }
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return { byProject: {} }
-    const parsed = JSON.parse(raw) as RecentSearchesState | null
-    if (!parsed || typeof parsed !== 'object' || !parsed.byProject) {
-      return { byProject: {} }
-    }
-    const out: RecentSearchesState = { byProject: {} }
-    for (const [projectId, list] of Object.entries(parsed.byProject)) {
-      if (!Array.isArray(list)) continue
-      out.byProject[projectId] = list
-        .filter((e): e is RecentSearch => !!e && typeof e.id === 'number')
-        .map((e) => ({
-          id: e.id,
-          title: typeof e.title === 'string' ? e.title : undefined,
-          type: typeof e.type === 'string' ? e.type : undefined,
-          ts: typeof e.ts === 'number' ? e.ts : Date.now()
-        }))
-        .slice(0, MAX_PER_PROJECT)
-    }
-    return out
+    return sanitizeState(readPersistedSlice(SLICE_NAME, LEGACY_STORAGE_KEY))
   } catch {
     return { byProject: {} }
   }
 }
 
 function persist(state: RecentSearchesState): void {
-  if (typeof localStorage === 'undefined') return
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-  } catch {
-    // Quota or privacy mode — recents stay in-memory for the session.
-  }
+  persistSlice(SLICE_NAME, state)
 }
 
 const initialState: RecentSearchesState = load()

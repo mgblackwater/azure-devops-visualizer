@@ -15,6 +15,13 @@ import type { SuggestionKeyDownProps } from '@tiptap/suggestion'
  * id here so the serializer can blindly rewrite to the ADO anchor form
  * without re-deriving anything.
  */
+/**
+ * Which layer in the merged candidate list this identity came from.
+ * Drives both the visible "RECENT" badge and the bucket-priority
+ * sort in the picker (recent → projectMember → live).
+ */
+export type MentionSource = 'recent' | 'projectMember' | 'live'
+
 export interface MentionItem {
   /** Stable identity key — the descriptor when ADO returned one, else the GUID. */
   id: string
@@ -25,11 +32,11 @@ export interface MentionItem {
   /** Avatar URL when ADO returned one. Falls back to initials. */
   imageUrl?: string
   /**
-   * Marks rows that come from this work item's recent contributors so
-   * the renderer can show a subtle "Recent" hint and pin them above
-   * the rest of the project list.
+   * Source bucket — the picker pins `recent` above `projectMember`
+   * above `live` regardless of fuzzy score, so familiar faces always
+   * float above org-wide IdentityPicker hits.
    */
-  recent?: boolean
+  source: MentionSource
 }
 
 /**
@@ -211,7 +218,7 @@ const MentionList = forwardRef<MentionListHandle, MentionListProps>(
                   </Typography>
                 )}
               </Box>
-              {item.recent && (
+              {item.source === 'recent' && (
                 <Typography
                   variant="caption"
                   color="primary"

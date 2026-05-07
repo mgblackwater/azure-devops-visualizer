@@ -1,15 +1,22 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
+import { persistSlice, readPersistedSlice } from './persistenceBridge'
 
 /**
  * Per-user favorites: pinned references to work items, wiki pages, and
- * saved queries the user wants quick access to. Persisted to localStorage
- * so they survive reloads, scoped per ADO organization so one user with
- * multiple orgs sees the right set in each.
+ * saved queries the user wants quick access to. Persisted to the disk-
+ * backed preferences store (`{userData}/preferences.json`) so they
+ * survive reloads even if Chromium hasn't flushed yet, scoped per ADO
+ * organization so one user with multiple orgs sees the right set in
+ * each.
  *
  * Items intentionally carry their own navigation metadata (`meta`) so the
  * app can route back to them without needing to re-fetch the parent
  * object — a wiki page stays openable even after the underlying wiki id
  * changes elsewhere in the UI.
+ *
+ * The legacy `localStorage` key is still consulted exactly once via
+ * `persistenceBridge.readPersistedSlice` to migrate prior installs onto
+ * the new file. Nothing else here touches localStorage.
  */
 
 export type FavoriteKind = 'workItem' | 'wikiPage' | 'savedQuery'
@@ -35,7 +42,8 @@ export interface FavoritesState {
   byOrg: Record<string, FavoriteItem[]>
 }
 
-const STORAGE_KEY = 'ado-viz:favorites:v1'
+const LEGACY_STORAGE_KEY = 'ado-viz:favorites:v1'
+const SLICE_NAME = 'favorites'
 const VALID_KINDS: readonly FavoriteKind[] = ['workItem', 'wikiPage', 'savedQuery']
 
 function emptyState(): FavoritesState {
@@ -85,36 +93,32 @@ function sanitizeItem(raw: unknown): FavoriteItem | null {
   }
 }
 
-function load(): FavoritesState {
-  if (typeof localStorage === 'undefined') return emptyState()
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return emptyState()
-    const parsed = JSON.parse(raw) as Partial<FavoritesState> | null
-    if (!parsed || typeof parsed !== 'object') return emptyState()
-    const out = emptyState()
-    if (parsed.byOrg && typeof parsed.byOrg === 'object') {
-      for (const [k, v] of Object.entries(parsed.byOrg)) {
-        if (typeof k !== 'string' || !Array.isArray(v)) continue
-        const cleaned = v
-          .map((entry) => sanitizeItem(entry))
-          .filter((entry): entry is FavoriteItem => entry !== null)
-        if (cleaned.length > 0) out.byOrg[k] = cleaned
-      }
+function sanitizeState(parsed: unknown): FavoritesState {
+  if (!parsed || typeof parsed !== 'object') return emptyState()
+  const p = parsed as Partial<FavoritesState>
+  const out = emptyState()
+  if (p.byOrg && typeof p.byOrg === 'object') {
+    for (const [k, v] of Object.entries(p.byOrg)) {
+      if (typeof k !== 'string' || !Array.isArray(v)) continue
+      const cleaned = v
+        .map((entry) => sanitizeItem(entry))
+        .filter((entry): entry is FavoriteItem => entry !== null)
+      if (cleaned.length > 0) out.byOrg[k] = cleaned
     }
-    return out
+  }
+  return out
+}
+
+function load(): FavoritesState {
+  try {
+    return sanitizeState(readPersistedSlice(SLICE_NAME, LEGACY_STORAGE_KEY))
   } catch {
     return emptyState()
   }
 }
 
 function persist(state: FavoritesState): void {
-  if (typeof localStorage === 'undefined') return
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-  } catch {
-    // Ignore quota / privacy mode failures — favorites are best-effort.
-  }
+  persistSlice(SLICE_NAME, state)
 }
 
 const initialState: FavoritesState = load()

@@ -210,6 +210,111 @@ export interface AdoWikiSearchHit {
   contentId?: string
 }
 
+/* ---------- git repositories ---------- */
+
+/**
+ * A single git repository inside a project. We keep the field set
+ * deliberately small — the PR list only needs id + name to filter,
+ * with `webUrl` and `defaultBranch` carried along for future UI bits.
+ * `isDisabled` is included so the UI can grey-out repos that ADO has
+ * marked as disabled (deleted-but-recoverable) without dropping them.
+ */
+export interface AdoGitRepository {
+  id: string
+  name: string
+  defaultBranch?: string
+  project: { id: string; name: string }
+  webUrl?: string
+  isDisabled?: boolean
+}
+
+/* ---------- pull requests ---------- */
+
+/**
+ * ADO REST exposes a richer PR identity record than the bare
+ * `AdoIdentity` we use for work items. Reviewers carry a vote and a
+ * couple of flags that drive the row's reviewer chip.
+ */
+export interface AdoPullRequestRef {
+  id?: string
+  displayName?: string
+  uniqueName?: string
+  imageUrl?: string
+  descriptor?: string
+}
+
+/**
+ * Vote semantics straight from ADO. Pinned to the literal numbers ADO
+ * returns so the UI doesn't have to translate between names — the
+ * reviewer-vote chip renders directly off these.
+ *
+ *  - `10`  → approved
+ *  - `5`   → approved with suggestions
+ *  - `0`   → no vote
+ *  - `-5`  → waiting for author
+ *  - `-10` → rejected
+ */
+export type AdoPullRequestVote = 10 | 5 | 0 | -5 | -10 | number
+
+export interface AdoPullRequestReviewer extends AdoPullRequestRef {
+  vote: AdoPullRequestVote
+  isRequired?: boolean
+  isFlagged?: boolean
+  hasDeclined?: boolean
+}
+
+export interface AdoPullRequestRepository {
+  id: string
+  name: string
+  /** Project the repo belongs to; needed to build the ADO web URL. */
+  project: { id: string; name: string }
+  url?: string
+}
+
+export type AdoPullRequestStatus =
+  | 'active'
+  | 'completed'
+  | 'abandoned'
+  | 'notSet'
+  | 'all'
+  | string
+
+export type AdoPullRequestMergeStatus =
+  | 'succeeded'
+  | 'conflicts'
+  | 'queued'
+  | 'rejectedByPolicy'
+  | 'failure'
+  | 'notSet'
+  | string
+
+/**
+ * Slice of the ADO pull-request payload this app actually consumes.
+ * Mirrors `_apis/git/pullrequests` — fields the renderer doesn't read
+ * (commits, completion options, labels, etc.) are intentionally
+ * omitted to keep the IPC payload small.
+ */
+export interface AdoPullRequest {
+  pullRequestId: number
+  title: string
+  description?: string
+  status: AdoPullRequestStatus
+  isDraft?: boolean
+  createdBy: AdoPullRequestRef
+  creationDate: string
+  closedDate?: string
+  /** e.g. `refs/heads/feature/foo`. */
+  sourceRefName: string
+  /** e.g. `refs/heads/main`. */
+  targetRefName: string
+  mergeStatus?: AdoPullRequestMergeStatus
+  repository: AdoPullRequestRepository
+  reviewers: AdoPullRequestReviewer[]
+  /** Raw API URL of the PR — handy for debugging, not used by the UI. */
+  url?: string
+  _links?: Record<string, { href?: string }>
+}
+
 export interface IpcError {
   code:
     | 'NOT_AUTHENTICATED'

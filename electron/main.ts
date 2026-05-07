@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, session, shell } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { registerIpcHandlers, broadcast } from './ipc/register'
@@ -81,6 +81,22 @@ if (!gotTheLock) {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
+  }
+})
+
+// Belt-and-suspenders flush of any renderer-side storage (Chromium
+// localStorage, IndexedDB, RTK Query persisted cache, etc.) before the
+// app exits. Chromium buffers these writes in memory and only flushes
+// lazily — without this, a quick quit-after-change can drop the most
+// recent edits. The bulk of our persisted state moved to a JSON file
+// owned by the main process (see `electron/persistence/preferencesStore.ts`)
+// which doesn't need this; the flush here protects any future renderer-
+// resident storage and any edge cases left over from the migration.
+app.on('before-quit', () => {
+  try {
+    void session.defaultSession.flushStorageData()
+  } catch {
+    // Best-effort — never block quit on a flush failure.
   }
 })
 

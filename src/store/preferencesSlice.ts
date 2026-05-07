@@ -1,14 +1,23 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
 import type { QuerySource, WorkspaceState } from './workspaceSlice'
+import { persistSlice, readPersistedSlice } from './persistenceBridge'
 
 /**
- * Per-user preferences persisted to localStorage. Keep this slice strictly
- * "user-pinned" choices — runtime selection state belongs to workspaceSlice,
- * but a snapshot of the workspace is mirrored here so the user doesn't have
- * to re-pick project / team / query / grouping on every reload.
+ * Per-user preferences persisted via the main-process disk-backed store
+ * (`{userData}/preferences.json`). Keep this slice strictly "user-pinned"
+ * choices — runtime selection state belongs to workspaceSlice, but a
+ * snapshot of the workspace is mirrored here so the user doesn't have to
+ * re-pick project / team / query / grouping on every reload.
  *
  * Both maps are keyed by organization URL so a user with multiple ADO
  * organizations gets sensible per-org values.
+ *
+ * Persistence used to live in `localStorage` under `STORAGE_KEY`, but
+ * Chromium's lazy flush dropped writes on a quick restart. The legacy
+ * `localStorage` read is kept *only* as the source for the one-shot
+ * migration in `persistenceBridge.readPersistedSlice` — the slice itself
+ * never reads or writes it directly anymore. Safe to remove the legacy
+ * key after a release or two.
  */
 
 export interface WorkspaceSnapshot {
@@ -40,7 +49,13 @@ export interface PreferencesState {
   sidebarCollapsed: boolean
 }
 
-const STORAGE_KEY = 'ado-viz:preferences:v1'
+/**
+ * Legacy `localStorage` key; kept only so the one-shot migration in
+ * `persistenceBridge.readPersistedSlice` can pick up data from previous
+ * builds. Nothing in this slice reads or writes localStorage directly.
+ */
+const LEGACY_STORAGE_KEY = 'ado-viz:preferences:v1'
+const SLICE_NAME = 'preferences'
 
 function emptyState(): PreferencesState {
   return {
@@ -60,33 +75,31 @@ function sanitizeThemeMode(value: unknown): ThemeMode {
     : 'system'
 }
 
+function sanitizeState(parsed: unknown): PreferencesState {
+  if (!parsed || typeof parsed !== 'object') return emptyState()
+  const p = parsed as Partial<PreferencesState>
+  const out = emptyState()
+  if (p.defaultProjectByOrg && typeof p.defaultProjectByOrg === 'object') {
+    for (const [k, v] of Object.entries(p.defaultProjectByOrg)) {
+      if (typeof k === 'string' && typeof v === 'string') {
+        out.defaultProjectByOrg[k] = v
+      }
+    }
+  }
+  if (p.workspaceByOrg && typeof p.workspaceByOrg === 'object') {
+    for (const [k, v] of Object.entries(p.workspaceByOrg)) {
+      if (typeof k !== 'string' || !v || typeof v !== 'object') continue
+      out.workspaceByOrg[k] = sanitizeSnapshot(v as Partial<WorkspaceSnapshot>)
+    }
+  }
+  out.themeMode = sanitizeThemeMode(p.themeMode)
+  out.sidebarCollapsed = typeof p.sidebarCollapsed === 'boolean' ? p.sidebarCollapsed : false
+  return out
+}
+
 function load(): PreferencesState {
-  if (typeof localStorage === 'undefined') return emptyState()
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return emptyState()
-    const parsed = JSON.parse(raw) as Partial<PreferencesState> | null
-    if (!parsed || typeof parsed !== 'object') return emptyState()
-    const out = emptyState()
-    if (
-      parsed.defaultProjectByOrg &&
-      typeof parsed.defaultProjectByOrg === 'object'
-    ) {
-      for (const [k, v] of Object.entries(parsed.defaultProjectByOrg)) {
-        if (typeof k === 'string' && typeof v === 'string') {
-          out.defaultProjectByOrg[k] = v
-        }
-      }
-    }
-    if (parsed.workspaceByOrg && typeof parsed.workspaceByOrg === 'object') {
-      for (const [k, v] of Object.entries(parsed.workspaceByOrg)) {
-        if (typeof k !== 'string' || !v || typeof v !== 'object') continue
-        out.workspaceByOrg[k] = sanitizeSnapshot(v as Partial<WorkspaceSnapshot>)
-      }
-    }
-    out.themeMode = sanitizeThemeMode(parsed.themeMode)
-    out.sidebarCollapsed = typeof parsed.sidebarCollapsed === 'boolean' ? parsed.sidebarCollapsed : false
-    return out
+    return sanitizeState(readPersistedSlice(SLICE_NAME, LEGACY_STORAGE_KEY))
   } catch {
     return emptyState()
   }
@@ -131,12 +144,10 @@ function isValidSource(s: unknown): s is QuerySource {
 }
 
 function persist(state: PreferencesState): void {
-  if (typeof localStorage === 'undefined') return
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-  } catch {
-    // Ignore quota / privacy mode failures.
-  }
+  // Routes through the main process — disk write is atomic and
+  // happens before the IPC ack, so the user can quit immediately
+  // after a change without losing it.
+  persistSlice(SLICE_NAME, state)
 }
 
 const initialState: PreferencesState = load()
