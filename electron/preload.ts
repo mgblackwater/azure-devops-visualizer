@@ -2,10 +2,12 @@ import { contextBridge, ipcRenderer } from 'electron'
 import {
   IPC,
   IPC_ERROR_PREFIX,
+  RENDERER_EVENT,
   type AdoBridge,
   type IpcChannel,
   type IpcArgs,
   type IpcResult,
+  type NotificationOpenTarget,
   type ReadPreferencesResult,
   type WritePreferencesResult
 } from '@shared/contract'
@@ -44,11 +46,28 @@ const bridge: AdoBridge = {
   on(event, handler) {
     if (event === 'connection-changed') {
       const listener = (_e: Electron.IpcRendererEvent, info: AdoConnectionInfo): void => {
-        handler(info)
+        ;(handler as (info: AdoConnectionInfo) => void)(info)
       }
       ipcRenderer.on('connection-changed', listener)
       return () => {
         ipcRenderer.removeListener('connection-changed', listener)
+      }
+    }
+    if (event === 'open-target') {
+      // Main pushes deep-link descriptors here when the user clicks a
+      // notification or picks a tray menu item — the renderer routes
+      // to /home + the right tab + (optionally) opens the work-item
+      // drawer. Mirrors the connection-changed wiring above so adding
+      // future renderer-bound events is a one-line extension.
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        target: NotificationOpenTarget
+      ): void => {
+        ;(handler as (target: NotificationOpenTarget) => void)(target)
+      }
+      ipcRenderer.on(RENDERER_EVENT.NotificationOpenTarget, listener)
+      return () => {
+        ipcRenderer.removeListener(RENDERER_EVENT.NotificationOpenTarget, listener)
       }
     }
     return () => {}
