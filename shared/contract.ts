@@ -23,6 +23,7 @@ import type {
   AdoWikiSearchHit,
   AdoWiqlResult,
   AdoWorkItem,
+  AdoWorkItemTypeState,
   PullRequestChangesSummary
 } from './adoTypes'
 
@@ -55,6 +56,27 @@ export const IPC = {
   WorkItemsBatchGet: 'workitems.batchGet',
   WorkItemsGetWithRelations: 'workitems.getWithRelations',
   WorkItemsPatch: 'workitems.patch',
+  /**
+   * Valid `System.State` values for a given work-item type within a
+   * project. Backed by `_apis/wit/workitemtypes/{type}/states`. Used
+   * by the drawer's clickable state pill to populate its popover so
+   * the user can pick from real, process-customised next states (not
+   * a hard-coded list) — and so we can colour each option by its
+   * stable ADO category. Cached 1 hour in main per (project,type)
+   * because the state list rarely changes mid-session.
+   */
+  WorkItemTypeStates: 'workitems.typeStates',
+  /**
+   * Project-wide tag suggestions for the work-item drawer's tag
+   * editor. ADO maintains a single tags collection per project (every
+   * tag ever applied to any work item shows up); we surface those
+   * names alphabetised and de-duped so the multi-select Autocomplete
+   * can suggest existing tags before letting the user free-type a
+   * brand-new one. Cached 5 minutes in main — fresh enough to pick
+   * up tags created elsewhere in a session, slow enough to avoid
+   * round-tripping every time a drawer opens.
+   */
+  ProjectTagsList: 'project.tags.list',
   /**
    * For each work item id, return a small summary (timestamp, plain-text
    * snippet, author) of the latest comment whose text contains the
@@ -272,6 +294,25 @@ export interface PatchWorkItemArgs {
   patch: AdoJsonPatch[]
   /** Bypass server validation rules. */
   bypassRules?: boolean
+}
+
+export interface GetWorkItemTypeStatesArgs {
+  projectId: string
+  /** e.g. `Bug`, `Task`, `Product Backlog Item`. */
+  workItemType: string
+}
+
+export interface GetWorkItemTypeStatesResult {
+  states: AdoWorkItemTypeState[]
+}
+
+export interface ListProjectTagsArgs {
+  projectId: string
+}
+
+export interface ListProjectTagsResult {
+  /** Just the tag names, sorted alphabetically (case-insensitive), deduped. */
+  tags: string[]
 }
 
 export interface ShellOpenExternalArgs {
@@ -533,6 +574,14 @@ export interface IpcSignatures {
     result: AdoWorkItem
   }
   [IPC.WorkItemsPatch]: { args: PatchWorkItemArgs; result: AdoWorkItem }
+  [IPC.WorkItemTypeStates]: {
+    args: GetWorkItemTypeStatesArgs
+    result: GetWorkItemTypeStatesResult
+  }
+  [IPC.ProjectTagsList]: {
+    args: ListProjectTagsArgs
+    result: ListProjectTagsResult
+  }
   [IPC.WorkItemsLatestMentions]: {
     args: LatestMentionsArgs
     result: LatestMentionsResult

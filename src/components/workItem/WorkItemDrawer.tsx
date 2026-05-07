@@ -18,12 +18,15 @@ import AccountTreeIcon from '@mui/icons-material/AccountTree'
 import PersonOutlineIcon from '@mui/icons-material/PersonOutline'
 import OpenInFullIcon from '@mui/icons-material/OpenInFull'
 import CloseFullscreenIcon from '@mui/icons-material/CloseFullscreen'
+import AddIcon from '@mui/icons-material/Add'
 import { useNavigate } from 'react-router-dom'
 import {
   useBatchGetWorkItemsQuery,
   useGetConnectionQuery,
   useGetWorkItemWithRelationsQuery,
-  useListWorkItemCommentsQuery
+  useListWorkItemCommentsQuery,
+  useUpdateWorkItemStateMutation,
+  useUpdateWorkItemTagsMutation
 } from '@/store/api/adoApi'
 import { IPC } from '@shared/contract'
 import { useAppDispatch, useAppSelector } from '@/store'
@@ -50,11 +53,14 @@ import { relativeTime } from '@/utils/sanitize'
 import { normalizeMentionName, buildSubtreeWiql } from '@/utils/wiql'
 import RichDescription from './RichDescription'
 import CommentComposer from './comment/CommentComposer'
+import StateChangerPopover from './StateChangerPopover'
+import TagEditorDialog from './TagEditorDialog'
 import FavoriteButton from '@/components/common/FavoriteButton'
 import type {
   AdoComment,
   AdoRelation,
-  AdoWorkItem
+  AdoWorkItem,
+  IpcError
 } from '@shared/adoTypes'
 
 const RELATION_GROUPS: Array<{
@@ -433,6 +439,65 @@ export default function WorkItemDrawer(): JSX.Element {
   const created = item ? getCreatedDate(item) : null
   const changed = item ? getChangedDate(item) : null
 
+  // ------- Inline quick-edits (state + tags) -------
+  // The state pill becomes a clickable chip that opens a popover; the
+  // tags row gets a `+` affordance that opens a small edit dialog.
+  // We deliberately do NOT optimistic-update the state chip — a 400 on
+  // a missing-reason transition would feel broken if the chip flips
+  // and then snaps back. Instead we render a spinner next to the chip
+  // while the mutation is in flight and rely on the WorkItem tag
+  // invalidation to pull the fresh state in on success. Tag edits go
+  // through a dedicated dialog with explicit Save intent, so the
+  // mutation there *does* optimistic-update for snappier feedback.
+  const [stateAnchor, setStateAnchor] = useState<HTMLElement | null>(null)
+  const [tagDialogOpen, setTagDialogOpen] = useState(false)
+  const [stateError, setStateError] = useState<string | null>(null)
+  const [updateState, updateStateRes] = useUpdateWorkItemStateMutation()
+  const [updateTags] = useUpdateWorkItemTagsMutation()
+
+  // Clear any lingering inline state-error alert as soon as the user
+  // navigates to a different work item — otherwise a "Closed requires
+  // a reason" alert from item #123 would still be sitting at the top
+  // of the drawer when they open #124.
+  useEffect(() => {
+    setStateError(null)
+    setStateAnchor(null)
+    setTagDialogOpen(false)
+  }, [selectedWorkItemId])
+
+  const stateMutationPending = updateStateRes.isLoading
+
+  async function handlePickState(newState: string): Promise<void> {
+    if (!projectId || !item) return
+    setStateError(null)
+    try {
+      await updateState({
+        projectId,
+        workItemId: item.id,
+        newState
+      }).unwrap()
+      setStateAnchor(null)
+    } catch (err) {
+      setStateError(readMutationErrorMessage(err, 'Failed to change state.'))
+      // Leave the popover open so the user can retry without re-clicking
+      // the chip. The inline alert tells them what went wrong.
+    }
+  }
+
+  async function handleSaveTags(nextTags: string[]): Promise<void> {
+    if (!projectId || !item) {
+      throw { code: 'INTERNAL', message: 'No work item selected.' } as IpcError
+    }
+    // Let the mutation throw — the dialog catches it and shows the
+    // error inline. The dialog only closes on resolve.
+    await updateTags({
+      projectId,
+      workItemId: item.id,
+      tags: nextTags
+    }).unwrap()
+    setTagDialogOpen(false)
+  }
+
   return (
     <Drawer
       anchor="right"
@@ -587,20 +652,38 @@ export default function WorkItemDrawer(): JSX.Element {
 
         {item && (
           <Stack spacing={2.5}>
+            {stateError && (
+              <Alert
+                severity="error"
+                onClose={() => setStateError(null)}
+                sx={{ py: 0.5 }}
+              >
+                {stateError}
+              </Alert>
+            )}
             <Stack spacing={0.75}>
               <MetadataRow label="State" value={
                 <Stack direction="row" alignItems="center" spacing={1}>
-                  <Box sx={{
-                    width: 10, height: 10, borderRadius: '50%',
-                    bgcolor: colorForState(getState(item)),
-                    border: (theme) =>
-                      `1px solid ${
-                        theme.palette.mode === 'dark'
-                          ? 'rgba(255,255,255,0.18)'
-                          : 'rgba(0,0,0,0.08)'
-                      }`
-                  }} />
-                  {getState(item)}
+                  <Tooltip title="Change state">
+                    <Chip
+                      size="small"
+                      label={getState(item)}
+                      onClick={(e) =>
+                        setStateAnchor(e.currentTarget as HTMLElement)
+                      }
+                      sx={{
+                        bgcolor: colorForState(getState(item)),
+                        color: readableTextColor(colorForState(getState(item))),
+                        fontWeight: 600,
+                        height: 22,
+                        cursor: 'pointer',
+                        '& .MuiChip-label': { px: 0.75, fontSize: 11 }
+                      }}
+                    />
+                  </Tooltip>
+                  {stateMutationPending && (
+                    <CircularProgress size={12} aria-label="Saving state" />
+                  )}
                 </Stack>
               } />
               <MetadataRow label="Assignee" value={getAssigneeName(item)} />
@@ -626,18 +709,54 @@ export default function WorkItemDrawer(): JSX.Element {
                   }
                 />
               )}
-              {tags.length > 0 && (
-                <MetadataRow
-                  label="Tags"
-                  value={
-                    <Stack direction="row" spacing={0.5} sx={{ flexWrap: 'wrap', gap: 0.5 }}>
-                      {tags.map((t) => (
-                        <Chip key={t} label={t} size="small" sx={{ height: 20 }} />
-                      ))}
-                    </Stack>
-                  }
-                />
-              )}
+              <MetadataRow
+                label="Tags"
+                value={
+                  <Stack
+                    direction="row"
+                    spacing={0.5}
+                    sx={{ flexWrap: 'wrap', gap: 0.5, alignItems: 'center' }}
+                  >
+                    {tags.map((t) => (
+                      <Chip
+                        key={t}
+                        label={t}
+                        size="small"
+                        sx={{ height: 20 }}
+                      />
+                    ))}
+                    {tags.length === 0 && (
+                      <Typography
+                        variant="caption"
+                        color="text.disabled"
+                        sx={{ mr: 0.5 }}
+                      >
+                        No tags
+                      </Typography>
+                    )}
+                    <Tooltip
+                      title={tags.length === 0 ? 'Add tags' : 'Edit tags'}
+                    >
+                      <Chip
+                        label={<AddIcon sx={{ fontSize: 14 }} />}
+                        size="small"
+                        variant="outlined"
+                        onClick={() => setTagDialogOpen(true)}
+                        aria-label="Edit tags"
+                        sx={{
+                          height: 20,
+                          cursor: 'pointer',
+                          '& .MuiChip-label': {
+                            px: 0.5,
+                            display: 'flex',
+                            alignItems: 'center'
+                          }
+                        }}
+                      />
+                    </Tooltip>
+                  </Stack>
+                }
+              />
               {created && (
                 <MetadataRow
                   label="Created"
@@ -761,8 +880,70 @@ export default function WorkItemDrawer(): JSX.Element {
         )}
 
       </Box>
+
+      {item && projectId && (
+        <>
+          <StateChangerPopover
+            open={Boolean(stateAnchor)}
+            anchorEl={stateAnchor}
+            onClose={() => setStateAnchor(null)}
+            currentState={getState(item)}
+            projectId={projectId}
+            workItemType={getType(item)}
+            pending={stateMutationPending}
+            onPick={handlePickState}
+          />
+          <TagEditorDialog
+            open={tagDialogOpen}
+            onClose={() => setTagDialogOpen(false)}
+            initialTags={tags}
+            projectId={projectId}
+            onSave={handleSaveTags}
+          />
+        </>
+      )}
     </Drawer>
   )
+}
+
+/**
+ * Read a human-readable error message out of an RTK Query mutation
+ * rejection. The bridge normalises ADO failures into `IpcError`; RTK
+ * Query then wraps that in a `FetchBaseQueryError` with the IpcError
+ * parked under `.data`. Both shapes get a verbatim ADO message; auth
+ * failures get a more actionable "scope your PAT" hint instead of the
+ * generic ADO copy.
+ */
+function readMutationErrorMessage(err: unknown, fallback: string): string {
+  if (err && typeof err === 'object') {
+    const e = err as Partial<IpcError> & {
+      data?: Partial<IpcError>
+      message?: string
+    }
+    const status = e.data?.status ?? e.status
+    const code = e.data?.code ?? e.code
+    if (
+      status === 401 ||
+      status === 403 ||
+      code === 'UNAUTHORIZED' ||
+      code === 'FORBIDDEN'
+    ) {
+      return "Your token doesn't have permission to edit work items. Update the PAT scope to include 'Work items (read & write)'."
+    }
+    if (
+      e.data &&
+      typeof e.data === 'object' &&
+      typeof e.data.message === 'string' &&
+      e.data.message.length > 0
+    ) {
+      return e.data.message
+    }
+    if (typeof e.message === 'string' && e.message.length > 0) {
+      return e.message
+    }
+  }
+  if (typeof err === 'string') return err
+  return fallback
 }
 
 /**

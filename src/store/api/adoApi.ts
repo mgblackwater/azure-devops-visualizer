@@ -7,10 +7,14 @@ import {
   IPC,
   type GetPullRequestChangesArgs,
   type GetPullRequestChangesResult,
+  type GetWorkItemTypeStatesArgs,
+  type GetWorkItemTypeStatesResult,
   type IpcArgs,
   type IpcChannel,
   type ListPullRequestsArgs,
   type ListPullRequestsResult,
+  type ListProjectTagsArgs,
+  type ListProjectTagsResult,
   type ListRepositoriesArgs,
   type ListRepositoriesResult,
   type UpdateWikiPageResult
@@ -46,6 +50,29 @@ export interface IpcInvokeArgs<C extends IpcChannel> {
  * thrown by `window.ado.invoke` itself before the IPC call left the
  * renderer). Anything stored in Redux state must be JSON-serializable.
  */
+/**
+ * Trim, drop empty/whitespace-only entries, dedupe case-insensitively
+ * (preserving the *first* casing the user typed), and join with
+ * `'; '` — the format ADO expects for `System.Tags` on write. Used by
+ * both the wire-level patch payload AND the optimistic cache update
+ * inside `updateWorkItemTags` so they stay consistent.
+ *
+ * Lifted out of the mutation body so it's testable in isolation if
+ * we add unit tests later, and so the optimistic path doesn't drift
+ * from the patch path silently.
+ */
+function normaliseTagsForPatch(tags: string[]): string {
+  const seen = new Map<string, string>()
+  for (const raw of tags) {
+    if (typeof raw !== 'string') continue
+    const trimmed = raw.trim()
+    if (!trimmed) continue
+    const key = trimmed.toLowerCase()
+    if (!seen.has(key)) seen.set(key, trimmed)
+  }
+  return [...seen.values()].join('; ')
+}
+
 function normalizeIpcError(raw: unknown): IpcError {
   if (raw && typeof raw === 'object' && 'code' in raw && 'message' in raw) {
     const r = raw as Partial<IpcError>
@@ -105,7 +132,16 @@ export const adoApi = createApi({
     'WikiPage',
     'PullRequest',
     'GitRepository',
-    'PullRequestChanges'
+    'PullRequestChanges',
+    /**
+     * The deduped, alphabetised list of every tag ever applied within
+     * a project. Provided by `listProjectTags`; invalidated by the
+     * tag-editor mutation (`updateWorkItemTags`) so a brand-new tag
+     * the user just typed appears in the suggester for the next item
+     * without manually refreshing. The state-changer mutation does
+     * NOT invalidate this — state edits never change the tag set.
+     */
+    'ProjectTags'
   ],
   endpoints: (build) => ({
     getConnection: build.query<AdoConnectionInfo, void>({
@@ -240,6 +276,177 @@ export const adoApi = createApi({
         }
       },
       invalidatesTags: (_r, _e, arg) => [{ type: 'WorkItem' as const, id: arg.id }]
+    }),
+
+    /**
+     * Valid `System.State` transitions for a given (project, work-item
+     * type), keyed at the project level so process customisations are
+     * respected. Backs the drawer's clickable state pill — the popover
+     * uses the response to render only the states this org actually
+     * configured for that type, coloured by their stable `category`.
+     *
+     * `keepUnusedDataFor: 600` matches the main-process 1-hour cache
+     * loosely — the renderer can drop the entry after 10 minutes
+     * without breaking re-fetch latency, since the underlying network
+     * call will still hit the in-memory cache for the rest of the
+     * hour.
+     */
+    getWorkItemTypeStates: build.query<
+      GetWorkItemTypeStatesResult,
+      GetWorkItemTypeStatesArgs
+    >({
+      query: (args) => ({ channel: IPC.WorkItemTypeStates, args }),
+      keepUnusedDataFor: 600
+    }),
+
+    /**
+     * Project-wide tag suggestions for the drawer's tag editor. Tagged
+     * with `'ProjectTags'` so `updateWorkItemTags` can invalidate the
+     * cache when the user commits a brand-new tag — and so other open
+     * drawers see the new tag in their suggester immediately. The
+     * state-update mutation deliberately does NOT invalidate this:
+     * state edits never affect the tag catalogue, and a stale tag
+     * list within the session is harmless for an additive feature.
+     */
+    listProjectTags: build.query<ListProjectTagsResult, ListProjectTagsArgs>({
+      query: (args) => ({ channel: IPC.ProjectTagsList, args }),
+      providesTags: ['ProjectTags'],
+      keepUnusedDataFor: 300
+    }),
+
+    /**
+     * Quick-edit: change a work item's `System.State`. Thin wrapper
+     * around `IPC.WorkItemsPatch` that builds the json-patch op for
+     * the caller, so the popover only has to know "newState".
+     *
+     * Intentionally does NOT optimistic-update the cache — state
+     * transitions are the most likely mutation to fail with a 400
+     * (e.g. "this transition requires a Reason"), and rolling back an
+     * optimistic chip swap mid-flight makes the UI feel broken. The
+     * caller renders a spinner next to the chip during the request
+     * and only swaps to the new state on success.
+     */
+    updateWorkItemState: build.mutation<
+      AdoWorkItem,
+      { projectId: string; workItemId: number; newState: string }
+    >({
+      query: (arg) => ({
+        channel: IPC.WorkItemsPatch,
+        args: {
+          projectId: arg.projectId,
+          id: arg.workItemId,
+          patch: [
+            {
+              op: 'add',
+              path: '/fields/System.State',
+              value: arg.newState
+            }
+          ] as AdoJsonPatch[]
+        }
+      }),
+      invalidatesTags: (_r, _e, arg) => [
+        { type: 'WorkItem' as const, id: arg.workItemId }
+      ]
+    }),
+
+    /**
+     * Quick-edit: replace a work item's `System.Tags`. ADO stores tags
+     * as a single semicolon-space-separated string; this wrapper
+     * normalises (trims, drops empties, dedupes case-insensitively),
+     * joins, and patches in one go.
+     *
+     * Optimistically updates `batchGetWorkItems` cache entries that
+     * include this id — unlike state, the user has already pressed
+     * "Save" in a dedicated dialog so reverting on error is the right
+     * UX (the dialog can re-open with the un-saved values intact). On
+     * success the matching `WorkItem` tag invalidates so a subscribed
+     * `getWorkItemWithRelations` query refetches cleanly, and
+     * `ProjectTags` invalidates so newly-typed tags show up in the
+     * suggester for other drawers.
+     */
+    updateWorkItemTags: build.mutation<
+      AdoWorkItem,
+      { projectId: string; workItemId: number; tags: string[] }
+    >({
+      query: (arg) => ({
+        channel: IPC.WorkItemsPatch,
+        args: {
+          projectId: arg.projectId,
+          id: arg.workItemId,
+          patch: [
+            {
+              op: 'add',
+              path: '/fields/System.Tags',
+              value: normaliseTagsForPatch(arg.tags)
+            }
+          ] as AdoJsonPatch[]
+        }
+      }),
+      async onQueryStarted(arg, { dispatch, queryFulfilled, getState }) {
+        const updates: Array<() => void> = []
+        const state = getState() as {
+          adoApi: {
+            queries: Record<
+              string,
+              { endpointName?: string; originalArgs?: unknown }
+            >
+          }
+        }
+        const queries = state.adoApi.queries
+        const tagString = normaliseTagsForPatch(arg.tags)
+        for (const [, entry] of Object.entries(queries)) {
+          if (entry.endpointName === 'batchGetWorkItems') {
+            const args = entry.originalArgs as
+              | {
+                  projectId?: string
+                  ids: number[]
+                  fields?: string[]
+                  $expand?: 'none' | 'relations' | 'fields' | 'links' | 'all'
+                }
+              | undefined
+            if (!args || !args.ids.includes(arg.workItemId)) continue
+            const patchResult = dispatch(
+              adoApi.util.updateQueryData('batchGetWorkItems', args, (draft) => {
+                const item = draft.find((w) => w.id === arg.workItemId)
+                if (!item) return
+                item.fields['System.Tags'] = tagString
+              })
+            )
+            updates.push(() => patchResult.undo())
+            continue
+          }
+          // The drawer reads its primary work item via
+          // `getWorkItemWithRelations`, NOT the batch endpoint, so we
+          // also patch any matching single-item cache entries —
+          // otherwise the chip strip wouldn't reflect the change until
+          // the cache invalidation refetch completes.
+          if (entry.endpointName === 'getWorkItemWithRelations') {
+            const args = entry.originalArgs as
+              | { projectId?: string; id: number }
+              | undefined
+            if (!args || args.id !== arg.workItemId) continue
+            const patchResult = dispatch(
+              adoApi.util.updateQueryData(
+                'getWorkItemWithRelations',
+                args,
+                (draft) => {
+                  draft.fields['System.Tags'] = tagString
+                }
+              )
+            )
+            updates.push(() => patchResult.undo())
+          }
+        }
+        try {
+          await queryFulfilled
+        } catch {
+          for (const undo of updates) undo()
+        }
+      },
+      invalidatesTags: (_r, _e, arg) => [
+        { type: 'WorkItem' as const, id: arg.workItemId },
+        'ProjectTags'
+      ]
     }),
 
     fetchAttachment: build.query<
@@ -474,6 +681,10 @@ export const {
   useBatchGetWorkItemsQuery,
   useGetWorkItemWithRelationsQuery,
   usePatchWorkItemMutation,
+  useGetWorkItemTypeStatesQuery,
+  useListProjectTagsQuery,
+  useUpdateWorkItemStateMutation,
+  useUpdateWorkItemTagsMutation,
   useFetchAttachmentQuery,
   useGetLatestMentionsQuery,
   useListWorkItemCommentsQuery,
