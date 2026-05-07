@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Box,
+  Button,
   IconButton,
   List,
   ListItem,
@@ -25,6 +26,7 @@ import {
   type FavoriteKind
 } from '@/store/favoritesSlice'
 import { selectWorkItem, setSource } from '@/store/workspaceSlice'
+import { fuzzyMatches } from '@/utils/fuzzyMatch'
 
 /**
  * Vertical list of pinned items rendered inside the "Favorites" tab on
@@ -40,11 +42,43 @@ import { selectWorkItem, setSource } from '@/store/workspaceSlice'
  * sufficient to navigate back, so we don't need to refetch ADO data
  * to render a row.
  */
-export default function FavoritesTab(): JSX.Element {
+export interface FavoritesTabProps {
+  /**
+   * Fuzzy filter query owned by the parent panel. Empty / whitespace-only
+   * values short-circuit to "match all". Co-ordinated with the search
+   * input on `MyWorkPanel` so the same `/`-to-focus + `Esc`-to-clear
+   * shortcuts work consistently across tabs.
+   */
+  filterQuery?: string
+  /**
+   * Invoked when the user clicks the "Clear filter" button on the
+   * filtered-empty state. The parent panel resets its own state so the
+   * search input clears in lockstep with the list returning to full.
+   */
+  onClearFilter?: () => void
+}
+
+export default function FavoritesTab({
+  filterQuery = '',
+  onClearFilter
+}: FavoritesTabProps = {}): JSX.Element {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
   const orgUrl = useGetConnectionQuery().data?.organizationUrl
   const favorites = useAppSelector((s) => selectFavorites(s, orgUrl))
+
+  /**
+   * Apply the fuzzy filter before grouping so each kind bucket reflects
+   * what's visible. Filtering after grouping would leave empty group
+   * headers behind.
+   */
+  const filtered = useMemo(() => {
+    const q = filterQuery.trim()
+    if (!q) return favorites
+    return favorites.filter((fav) =>
+      fuzzyMatches(q, buildFavoriteSearchableText(fav))
+    )
+  }, [favorites, filterQuery])
 
   const grouped = useMemo(() => {
     const out: Record<FavoriteKind, FavoriteItem[]> = {
@@ -54,9 +88,11 @@ export default function FavoritesTab(): JSX.Element {
     }
     // selectFavorites already returns newest-first; pushing in iteration
     // order preserves that within each bucket.
-    for (const fav of favorites) out[fav.kind].push(fav)
+    for (const fav of filtered) out[fav.kind].push(fav)
     return out
-  }, [favorites])
+  }, [filtered])
+
+  const filterActive = filterQuery.trim().length > 0
 
   function handleOpen(item: FavoriteItem): void {
     switch (item.kind) {
@@ -105,6 +141,33 @@ export default function FavoritesTab(): JSX.Element {
           No favorites yet — click the ⭐ on a work item or wiki page to
           pin it here.
         </Typography>
+      </Box>
+    )
+  }
+
+  if (filterActive && filtered.length === 0) {
+    return (
+      <Box sx={{ p: 4, textAlign: 'center' }}>
+        <Typography color="text.secondary" gutterBottom>
+          No items in this list match{' '}
+          <Box
+            component="span"
+            sx={{
+              fontFamily: 'monospace',
+              bgcolor: 'action.hover',
+              px: 0.5,
+              borderRadius: 0.5
+            }}
+          >
+            {filterQuery}
+          </Box>
+          .
+        </Typography>
+        {onClearFilter && (
+          <Button size="small" onClick={onClearFilter} sx={{ mt: 1 }}>
+            Clear filter
+          </Button>
+        )}
       </Box>
     )
   }
@@ -234,6 +297,32 @@ const ICON_BY_KIND: Record<FavoriteKind, typeof AssignmentIcon> = {
   workItem: AssignmentIcon,
   wikiPage: MenuBookIcon,
   savedQuery: BookmarkIcon
+}
+
+/**
+ * Builds the haystack string fed into `fuzzyMatches` for a favorite row.
+ * Indexes everything visible on the row (label, derived subtitle) plus
+ * a couple of fields the user is likely to recall — kind ("workItem" /
+ * "wikiPage" / "savedQuery"), the raw id, and any string-typed `meta`
+ * values like `wikiName`, `queryName`, `type`, and `path`. Non-string
+ * meta values are skipped because `FavoriteItem.meta` allows numbers
+ * and we only want textual signals here.
+ */
+function buildFavoriteSearchableText(item: FavoriteItem): string {
+  const parts: string[] = [
+    item.label,
+    item.kind,
+    item.id,
+    KIND_HEADERS[item.kind],
+    item.projectId ?? '',
+    subtitleFor(item) ?? ''
+  ]
+  if (item.meta) {
+    for (const v of Object.values(item.meta)) {
+      if (typeof v === 'string' && v) parts.push(v)
+    }
+  }
+  return parts.filter(Boolean).join(' ')
 }
 
 function subtitleFor(item: FavoriteItem): string | null {

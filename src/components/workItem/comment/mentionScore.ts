@@ -8,6 +8,15 @@ import type { MentionItem } from './MentionList'
  * this runs in O(n) per keystroke without breaking a sweat. Pulling in
  * fuse.js or fzf-style trigram matchers would be overkill here.
  *
+ * NOTE: For *generic* list filtering (Home page tabs, etc.) prefer
+ * `src/utils/fuzzyMatch.ts`'s `fuzzyMatchScore` / `fuzzyMatches`. That
+ * helper is the canonical single-haystack version of the same tier
+ * scheme. This file is kept separate because the mention picker treats
+ * `label` and `uniqueName` as two independent exact-match candidates
+ * (so "jane doe" tier-1000-matches a row whose label is "Jane Doe"
+ * even though the uniqueName trails behind in the hay), which the
+ * single-string variant deliberately doesn't model.
+ *
  * Scoring tiers (highest → lowest, all case-insensitive):
  *
  *   1000  exact match against the full label *or* uniqueName
