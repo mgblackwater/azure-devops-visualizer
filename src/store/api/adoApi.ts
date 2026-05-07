@@ -3,10 +3,16 @@ import {
   type BaseQueryFn,
   type FetchBaseQueryError
 } from '@reduxjs/toolkit/query/react'
-import { IPC, type IpcArgs, type IpcChannel } from '@shared/contract'
+import {
+  IPC,
+  type IpcArgs,
+  type IpcChannel,
+  type UpdateWikiPageResult
+} from '@shared/contract'
 import type {
   AdoComment,
   AdoConnectionInfo,
+  AdoIdentity,
   AdoIteration,
   AdoJsonPatch,
   AdoProject,
@@ -81,7 +87,17 @@ const ipcBaseQuery: BaseQueryFn<
 export const adoApi = createApi({
   reducerPath: 'adoApi',
   baseQuery: ipcBaseQuery,
-  tagTypes: ['Connection', 'Projects', 'Teams', 'Iterations', 'SavedQueries', 'WorkItems', 'WorkItem', 'Wikis'],
+  tagTypes: [
+    'Connection',
+    'Projects',
+    'Teams',
+    'Iterations',
+    'SavedQueries',
+    'WorkItems',
+    'WorkItem',
+    'Wikis',
+    'WikiPage'
+  ],
   endpoints: (build) => ({
     getConnection: build.query<AdoConnectionInfo, void>({
       query: () => ({ channel: IPC.ConnectionGet }),
@@ -287,13 +303,45 @@ export const adoApi = createApi({
     }),
 
     /** Body of a single wiki page (markdown). Cached so back/forward in
-     *  the tree doesn't hit the network. */
+     *  the tree doesn't hit the network. The page is also tagged with
+     *  a `WikiPage` id keyed by `wikiId:path` so that the update
+     *  mutation can invalidate exactly this entry — invalidating only
+     *  by string tag would refetch every wiki page the renderer has
+     *  ever loaded, which is wasteful when the user only edited one. */
     getWikiPage: build.query<
       AdoWikiPage,
       { projectId: string; wikiId: string; path: string }
     >({
       query: (args) => ({ channel: IPC.WikiGetPage, args }),
-      keepUnusedDataFor: 60
+      keepUnusedDataFor: 60,
+      providesTags: (_result, _err, arg) => [
+        { type: 'WikiPage' as const, id: `${arg.wikiId}:${arg.path}` }
+      ]
+    }),
+
+    /**
+     * Replace the markdown body of a wiki page. Requires the most
+     * recent eTag (lifted off the GET response by the main process)
+     * for optimistic concurrency — a stale eTag surfaces as a
+     * `CONFLICT` IpcError so the WikiPage view can prompt for reload-
+     * or-overwrite. On success the matching `WikiPage` tag is
+     * invalidated so any subscribed `getWikiPage` query refetches the
+     * fresh content automatically.
+     */
+    updateWikiPage: build.mutation<
+      UpdateWikiPageResult,
+      {
+        projectId: string
+        wikiId: string
+        path: string
+        content: string
+        eTag?: string
+      }
+    >({
+      query: (args) => ({ channel: IPC.WikiUpdatePage, args }),
+      invalidatesTags: (_result, _err, arg) => [
+        { type: 'WikiPage' as const, id: `${arg.wikiId}:${arg.path}` }
+      ]
     }),
 
     /**
@@ -307,6 +355,36 @@ export const adoApi = createApi({
     >({
       query: (args) => ({ channel: IPC.WikiSearch, args }),
       keepUnusedDataFor: 30
+    }),
+
+    /**
+     * Append a new comment to a work item. Invalidates the matching
+     * `WorkItem` tag so a subscribed `listWorkItemComments` query
+     * refetches and the drawer's discussion list shows the new entry
+     * without the user manually refreshing.
+     */
+    addWorkItemComment: build.mutation<
+      { comment: AdoComment },
+      { projectId: string; workItemId: number; htmlText: string }
+    >({
+      query: (args) => ({ channel: IPC.WorkItemAddComment, args }),
+      invalidatesTags: (_r, _e, arg) => [
+        { type: 'WorkItem' as const, id: arg.workItemId }
+      ]
+    }),
+
+    /**
+     * Project member identities for the comment composer's `@`-mention
+     * picker. Members rarely change, so we let RTK Query keep the
+     * payload around generously — the main process also caches the
+     * underlying ADO calls aggressively.
+     */
+    getProjectMembers: build.query<
+      { identities: AdoIdentity[] },
+      { projectId: string }
+    >({
+      query: (args) => ({ channel: IPC.IdentitySearch, args }),
+      keepUnusedDataFor: 60 * 60
     })
   })
 })
@@ -332,5 +410,8 @@ export const {
   useListWikisQuery,
   useGetWikiPageTreeQuery,
   useGetWikiPageQuery,
-  useSearchWikiQuery
+  useSearchWikiQuery,
+  useUpdateWikiPageMutation,
+  useAddWorkItemCommentMutation,
+  useGetProjectMembersQuery
 } = adoApi

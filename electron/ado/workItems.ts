@@ -1,4 +1,4 @@
-import { adoFetch } from './client'
+import { adoFetch, invalidateCacheForPathPrefix } from './client'
 import type {
   AdoComment,
   AdoJsonPatch,
@@ -316,6 +316,41 @@ export async function listComments(args: {
     return tb - ta
   })
   return { comments }
+}
+
+/**
+ * Append a new comment to a work item. The body is HTML — TipTap output
+ * post-`serializeForAdo`. ADO accepts standard rich-text markup
+ * (paragraphs, lists, links, code blocks) plus its own mention anchor
+ * form `<a data-vss-mention="version:2.0,{descriptor}">@Name</a>`; the
+ * renderer is expected to produce that markup before invoking us, so
+ * this function is a thin POST.
+ *
+ * On success we invalidate the comments cache for this work item so a
+ * follow-up `listComments` (triggered by RTK Query tag invalidation
+ * downstream) goes back to the network and picks up the new entry.
+ */
+export async function addComment(args: {
+  projectId: string
+  workItemId: number
+  htmlText: string
+}): Promise<{ comment: AdoComment }> {
+  const projectSegment = `/${encodeURIComponent(args.projectId)}`
+  const data = await adoFetch<AdoComment>({
+    method: 'POST',
+    path: `${projectSegment}/_apis/wit/workItems/${args.workItemId}/comments`,
+    apiVersion: COMMENTS_API_VERSION,
+    body: { text: args.htmlText },
+    cacheTtlMs: 0
+  })
+  // The path-prefix invalidator drops every cached GET that includes the
+  // comments path; the cache key for `listComments` is custom-shaped so
+  // we also explicitly nuke it to belt-and-braces the freshness.
+  invalidateCacheForPathPrefix(
+    `${projectSegment}/_apis/wit/workItems/${args.workItemId}/comments`
+  )
+  invalidateCacheForPathPrefix(`comments:${projectSegment}:${args.workItemId}`)
+  return { comment: data }
 }
 
 /**

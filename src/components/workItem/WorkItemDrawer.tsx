@@ -49,6 +49,7 @@ import { colorForState, colorForType, readableTextColor } from '@/utils/adoColor
 import { relativeTime } from '@/utils/sanitize'
 import { normalizeMentionName, buildSubtreeWiql } from '@/utils/wiql'
 import RichDescription from './RichDescription'
+import CommentComposer from './comment/CommentComposer'
 import FavoriteButton from '@/components/common/FavoriteButton'
 import type {
   AdoComment,
@@ -693,6 +694,8 @@ export default function WorkItemDrawer(): JSX.Element {
               loading={commentsQ.isFetching}
               error={commentsQ.error != null}
               myNameNeedle={myNameNeedle}
+              projectId={projectId}
+              workItem={item}
             />
 
             <Box>
@@ -780,12 +783,16 @@ function DiscussionSection({
   comments,
   loading,
   error,
-  myNameNeedle
+  myNameNeedle,
+  projectId,
+  workItem
 }: {
   comments: AdoComment[] | undefined
   loading: boolean
   error: boolean
   myNameNeedle?: string
+  projectId: string | null
+  workItem: AdoWorkItem | undefined
 }): JSX.Element {
   const list = comments ?? []
   return (
@@ -821,13 +828,13 @@ function DiscussionSection({
       )}
 
       {!loading && !error && list.length === 0 && (
-        <Typography variant="caption" color="text.disabled" sx={{ pl: 1 }}>
+        <Typography variant="caption" color="text.disabled" sx={{ pl: 1, mb: 1, display: 'block' }}>
           No comments yet.
         </Typography>
       )}
 
       {list.length > 0 && (
-        <Stack spacing={1}>
+        <Stack spacing={1} sx={{ mb: 1.5 }}>
           {list.map((c) => (
             <CommentCard
               key={c.id}
@@ -840,6 +847,18 @@ function DiscussionSection({
             />
           ))}
         </Stack>
+      )}
+
+      {/* Composer sits at the bottom of the thread so the natural reading
+          order is "history above, write below" — which mirrors how
+          chat-style discussions render across the rest of ADO and how
+          the user already scrolls through this section. */}
+      {projectId && workItem && (
+        <CommentComposer
+          projectId={projectId}
+          workItem={workItem}
+          comments={list}
+        />
       )}
     </Box>
   )

@@ -9,6 +9,7 @@ import type {
   AdoComment,
   AdoConnectionInfo,
   AdoConnectionInput,
+  AdoIdentity,
   AdoIteration,
   AdoJsonPatch,
   AdoProject,
@@ -91,6 +92,32 @@ export const IPC = {
    * detects that and falls back to client-side filtering.
    */
   WikiSearch: 'wiki.search',
+  /**
+   * Update a single wiki page's markdown body. Requires the most recent
+   * page eTag (from a prior `WikiGetPage` or `WikiUpdatePage`) for
+   * optimistic concurrency — ADO returns 412 if the eTag is stale, and
+   * we surface that as `IpcError.code === 'CONFLICT'` so the renderer
+   * can prompt the user to reload or overwrite.
+   */
+  WikiUpdatePage: 'wiki.updatePage',
+
+  /**
+   * Append a new comment / discussion entry to a single work item. The
+   * payload is HTML (TipTap output, post-`serializeForAdo`) — ADO
+   * accepts standard rich-text markup, including `@`-mention anchors of
+   * the form `<a data-vss-mention="version:2.0,{descriptor}">@Name</a>`.
+   */
+  WorkItemAddComment: 'workitems.addComment',
+
+  /**
+   * Resolve a project's member identities for the comment composer's
+   * `@`-mention picker. Server-side picks the project's *default team*
+   * and lifts its members; the renderer merges in recent contributors
+   * from the work item's existing comment history client-side, so this
+   * channel intentionally returns just the project's broad member list
+   * rather than per-work-item participants.
+   */
+  IdentitySearch: 'identity.search',
 
   ShellOpenExternal: 'shell.openExternal'
 } as const
@@ -252,6 +279,67 @@ export interface SearchWikiResult {
   results: AdoWikiSearchHit[]
 }
 
+export interface UpdateWikiPageArgs {
+  projectId: string
+  wikiId: string
+  /** Page path, e.g. `/Architecture/Overview`. Should start with '/'. */
+  path: string
+  /** Full new markdown body. Replaces the page content wholesale. */
+  content: string
+  /**
+   * Most recent eTag for this page, returned by `WikiGetPage` or a prior
+   * `WikiUpdatePage`. Sent as `If-Match` so ADO can reject the write
+   * with 412 when someone else updated the page in the meantime. When
+   * omitted, the request is sent with `If-Match: *` (force-overwrite) —
+   * use only after a deliberate conflict-resolution flow.
+   */
+  eTag?: string
+}
+
+export interface UpdateWikiPageResult {
+  /**
+   * The updated page metadata (path, id, eTag etc). The fresh eTag is
+   * the important bit — the renderer stashes it for the next save so
+   * sequential edits don't trigger the conflict dialog every time.
+   */
+  page: AdoWikiPage
+  /**
+   * Echo of the content that was committed. Useful for reconciling
+   * client state after a successful overwrite without a follow-up GET.
+   */
+  content: string
+}
+
+export interface AddWorkItemCommentArgs {
+  projectId: string
+  /** Numeric work-item id the comment is being attached to. */
+  workItemId: number
+  /**
+   * HTML body. The renderer is expected to have already rewritten any
+   * mention markup into ADO's `data-vss-mention` anchor form and
+   * sanitised the output before invocation; we don't re-sanitise here.
+   */
+  htmlText: string
+}
+
+export interface AddWorkItemCommentResult {
+  /** The newly-persisted comment as ADO returned it (with id, dates). */
+  comment: AdoComment
+}
+
+export interface IdentitySearchArgs {
+  projectId: string
+}
+
+export interface IdentitySearchResult {
+  /**
+   * Project-team members whose identities can be `@`-mentioned. Sourced
+   * from the project's default team for breadth — the renderer dedupes
+   * and merges in recent contributors from the open work item locally.
+   */
+  identities: AdoIdentity[]
+}
+
 /* ---------- channel signature map (request -> response) ---------- */
 
 export interface IpcSignatures {
@@ -289,6 +377,19 @@ export interface IpcSignatures {
   [IPC.WikiPageTree]: { args: GetWikiPageTreeArgs; result: AdoWikiPage }
   [IPC.WikiGetPage]: { args: GetWikiPageArgs; result: AdoWikiPage }
   [IPC.WikiSearch]: { args: SearchWikiArgs; result: SearchWikiResult }
+  [IPC.WikiUpdatePage]: {
+    args: UpdateWikiPageArgs
+    result: UpdateWikiPageResult
+  }
+
+  [IPC.WorkItemAddComment]: {
+    args: AddWorkItemCommentArgs
+    result: AddWorkItemCommentResult
+  }
+  [IPC.IdentitySearch]: {
+    args: IdentitySearchArgs
+    result: IdentitySearchResult
+  }
 
   [IPC.ShellOpenExternal]: { args: ShellOpenExternalArgs; result: { ok: true } }
 }

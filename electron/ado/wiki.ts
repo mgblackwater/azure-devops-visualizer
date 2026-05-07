@@ -1,10 +1,16 @@
-import { adoFetch, AdoApiError } from './client'
+import {
+  adoFetch,
+  adoFetchRaw,
+  AdoApiError,
+  invalidateCacheForPathPrefix
+} from './client'
 import { getStoredOrganizationUrl } from '../auth/tokenStore'
 import type {
   AdoWiki,
   AdoWikiPage,
   AdoWikiSearchHit
 } from '@shared/adoTypes'
+import type { UpdateWikiPageResult } from '@shared/contract'
 
 interface AdoListResponse<T> {
   count: number
@@ -61,7 +67,12 @@ export async function getWikiPage(args: {
   // callers can pass either form without thinking about it.
   const normalisedPath = args.path.startsWith('/') ? args.path : `/${args.path}`
   const includeContent = args.includeContent ?? true
-  return adoFetch<AdoWikiPage>({
+  // Use the raw fetch so we can pull the page version off the `ETag`
+  // response header. The renderer needs that for `If-Match` on a
+  // subsequent update; without it, every save would race the conflict
+  // path. The cache stores the full envelope, so a hit still gives us
+  // the eTag without a network round-trip.
+  const raw = await adoFetchRaw<AdoWikiPage>({
     method: 'GET',
     path: `/${encodeURIComponent(args.projectId)}/_apis/wiki/wikis/${encodeURIComponent(args.wikiId)}/pages`,
     query: {
@@ -72,6 +83,79 @@ export async function getWikiPage(args: {
     cacheTtlMs: WIKI_PAGE_TTL_MS,
     cacheKey: `wiki:page:${args.projectId}:${args.wikiId}:${normalisedPath}:${includeContent}`
   })
+  return attachETag(raw.data, raw.headers)
+}
+
+/**
+ * Replace the markdown body of a single wiki page. Requires the page's
+ * current `eTag` (received from {@link getWikiPage} or a prior call to
+ * this function) for optimistic concurrency control via `If-Match` —
+ * ADO will reject with 412 when the eTag is stale, which we surface as
+ * `AdoApiError` with `code: 'CONFLICT'` so the renderer can prompt the
+ * user to reload or force-overwrite.
+ *
+ * On success the page cache is invalidated and the returned envelope
+ * carries the freshly-issued eTag, letting the renderer chain
+ * sequential edits without a follow-up GET.
+ */
+export async function updatePage(args: {
+  projectId: string
+  wikiId: string
+  path: string
+  content: string
+  /** Most recent eTag for this page. Omit to force-overwrite (`If-Match: *`). */
+  eTag?: string
+}): Promise<UpdateWikiPageResult> {
+  const normalisedPath = args.path.startsWith('/') ? args.path : `/${args.path}`
+  const headers: Record<string, string> = {
+    // Some ADO clusters store the eTag with surrounding double-quotes
+    // and others without. We pass it through verbatim — `getWikiPage`
+    // captured exactly what the server sent — so the round-trip
+    // matches whatever the server expects on read-back.
+    'If-Match': args.eTag && args.eTag.length > 0 ? args.eTag : '*'
+  }
+  const raw = await adoFetchRaw<AdoWikiPage>({
+    method: 'PUT',
+    path: `/${encodeURIComponent(args.projectId)}/_apis/wiki/wikis/${encodeURIComponent(args.wikiId)}/pages`,
+    query: { path: normalisedPath },
+    apiVersion: WIKI_API_VERSION,
+    body: { content: args.content },
+    headers,
+    // PUTs aren't cached by adoFetchRaw, but PUTs DO go through the
+    // cache invalidator. The default invalidation is by path-prefix
+    // and only sees the request path (no query). Belt-and-braces a
+    // matching invalidation here so an immediately-subsequent GET on
+    // the same wiki path can never serve a stale value.
+    cacheTtlMs: 0
+  })
+  invalidateCacheForPathPrefix(
+    `wiki:page:${args.projectId}:${args.wikiId}:${normalisedPath}:`
+  )
+  const page = attachETag(raw.data, raw.headers)
+  // ADO's PUT response body usually echoes the page record without the
+  // `content` field populated; carry the new content through ourselves
+  // so the renderer can keep its local view in sync without a refetch.
+  return {
+    page: { ...page, content: args.content },
+    content: args.content
+  }
+}
+
+/**
+ * Pull the `ETag` header off a raw ADO response and attach it to the
+ * typed page record. ADO's wiki API uses the standard `ETag` header
+ * (lower-cased once it reaches `adoFetchRaw`'s headers map) and the
+ * value is what `If-Match` expects on the matching PUT. We fall back
+ * to `undefined` if the server omits the header — older on-prem
+ * deployments occasionally do.
+ */
+function attachETag(
+  page: AdoWikiPage,
+  headers: Record<string, string>
+): AdoWikiPage {
+  const eTag = headers['etag']
+  if (!eTag) return page
+  return { ...page, eTag }
 }
 
 interface SearchResponse {

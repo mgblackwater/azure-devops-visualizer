@@ -72,6 +72,41 @@ interface MarkdownViewProps {
    *  `/.attachments/` — those resolve inside the page's own folder in
    *  the wiki repo, not at wiki root. */
   currentPagePath?: string
+  /** When provided, every rendered table gets a hover-revealed "Edit"
+   *  button that calls this with the table's parsed shape. Lets the
+   *  caller open the shared TableBuilderDialog populated with the
+   *  existing table — we don't write back to the wiki, the user
+   *  copies the new markdown and pastes it back into ADO. */
+  onEditTable?: (table: WikiMarkdownTable) => void
+}
+
+/**
+ * Parsed shape of a markdown table found in the wiki source. Mirrors
+ * the dialog's edit model — `cells[0]` is the header row when
+ * `headerRow` is true; otherwise `cells` is body-only and the table
+ * was authored with the synthetic-empty-header form.
+ */
+export interface WikiMarkdownTable {
+  cells: string[][]
+  alignments: ('left' | 'center' | 'right')[]
+  headerRow: boolean
+  /** Verbatim source of the table block, used by the wiki page
+   *  orchestrator to splice the new markdown over the original block
+   *  on Save (paired with `startLine` / `endLine`). */
+  rawMarkdown: string
+  /**
+   * 0-based line index of the table's first line (header row) in the
+   * source document. Pairs with `endLine` to define a half-open
+   * `[startLine, endLine)` slice that matches the table block exactly,
+   * so callers can splice replacements without touching neighbours.
+   */
+  startLine: number
+  /**
+   * 0-based line index of the line just past the table's last body row
+   * (exclusive). Use `source.split('\n').slice(startLine, endLine)` to
+   * recover the table's lines verbatim.
+   */
+  endLine: number
 }
 
 const MAX_RENDERED_CONTENT_LENGTH = 1_000_000
@@ -96,7 +131,8 @@ export default function MarkdownView({
   wikiName,
   projectId,
   wikiRepositoryId,
-  currentPagePath
+  currentPagePath,
+  onEditTable
 }: MarkdownViewProps): JSX.Element {
   const navigate = useNavigate()
   const dispatch = useAppDispatch()
@@ -204,9 +240,18 @@ export default function MarkdownView({
     setPendingWorkItemIds([])
   }, [markdown, wikiId])
 
+  // Parse the source for table blocks once per markdown change. The
+  // result is paired index-by-index with rendered DOM tables (see
+  // Effect A's table walker). We keep this off the imageMap path so a
+  // pending image fetch doesn't re-parse every table on the page.
+  const parsedTables = useMemo(
+    () => parseMarkdownTables(markdown ?? ''),
+    [markdown]
+  )
+
   // Stable click handler — captures the current navigate / wikiId /
-  // dispatch via refs so we don't need to detach/reattach on every
-  // render. Dispatch is technically already stable from
+  // dispatch / onEditTable via refs so we don't need to detach/reattach
+  // on every render. Dispatch is technically already stable from
   // `useAppDispatch`, but the ref keeps the click closure consistent
   // with the other handlers.
   const navigateRef = useRef(navigate)
@@ -215,8 +260,33 @@ export default function MarkdownView({
   wikiIdRef.current = wikiId
   const dispatchRef = useRef(dispatch)
   dispatchRef.current = dispatch
+  const onEditTableRef = useRef(onEditTable)
+  onEditTableRef.current = onEditTable
+  const parsedTablesRef = useRef(parsedTables)
+  parsedTablesRef.current = parsedTables
 
   const handleClick = useCallback((e: Event): void => {
+    // Edit-table button takes priority because it's our injected
+    // affordance — never let it bubble through to the generic anchor
+    // handler. Look up the parsed table by index from the ref so we
+    // always read the current parse, not the one captured when the
+    // button was wired up.
+    const editBtn = (e.target as HTMLElement | null)?.closest(
+      '[data-md-table-edit]'
+    )
+    if (editBtn) {
+      e.preventDefault()
+      e.stopPropagation()
+      const idxStr = editBtn.getAttribute('data-md-table-edit')
+      const idx = idxStr ? parseInt(idxStr, 10) : NaN
+      const tables = parsedTablesRef.current
+      const cb = onEditTableRef.current
+      if (Number.isFinite(idx) && idx >= 0 && idx < tables.length && cb) {
+        cb(tables[idx])
+      }
+      return
+    }
+
     // Work-item ref chips take precedence over generic anchor handling
     // because a chip lives inside flowing text and could otherwise be
     // mistaken for an in-page anchor with no href. We dispatch into
@@ -369,6 +439,26 @@ export default function MarkdownView({
     )
   }, [sanitizedHtml, workItemRefsQ.data, workItemRefsQ.isFetching])
 
+  // Effect D: wrap every rendered <table> with an "Edit" affordance,
+  // keyed by the table's index in the source. The actual click is
+  // handled by the container-level click listener (handleClick) which
+  // reads back `parsedTablesRef` — keeping all event wiring on one
+  // bubbling listener avoids re-attaching N handlers per re-render.
+  // Skipped entirely when no `onEditTable` is provided so non-wiki
+  // markdown views (if any are added later) don't get phantom
+  // controls.
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    if (!onEditTable) {
+      // Caller opted out — strip any leftover wrappers from a previous
+      // render so we don't show non-functional buttons.
+      unwrapEditableTables(container)
+      return
+    }
+    attachTableEditButtons(container, parsedTables.length)
+  }, [sanitizedHtml, parsedTables, onEditTable])
+
   // Hard ceiling so a runaway page can't lock the renderer. Real wiki
   // pages stay well under this; bloated docs get truncated.
   const safeHtml =
@@ -470,6 +560,57 @@ export default function MarkdownView({
             bgcolor: codeBg,
             fontWeight: 600,
             textAlign: 'left'
+          },
+          // Edit-table affordance. The wrapper exists only when the
+          // parent supplies an onEditTable handler (see Effect D).
+          // Tables stay full-width; the button floats over the top-
+          // right corner and is keyboard-focusable for accessibility.
+          '& .md-table-wrap': {
+            position: 'relative',
+            // Pin tables to a non-zero height so the button doesn't
+            // visually collide with surrounding paragraphs when the
+            // table itself is tiny.
+            '&:hover .md-table-edit-btn, &:focus-within .md-table-edit-btn': {
+              opacity: 1,
+              pointerEvents: 'auto'
+            },
+            '& > table': { my: 1.25 }
+          },
+          '& .md-table-edit-btn': {
+            position: 'absolute',
+            top: 6,
+            right: 6,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 0.5,
+            px: 0.75,
+            py: 0.25,
+            fontSize: 11,
+            lineHeight: 1.3,
+            fontFamily: 'inherit',
+            fontWeight: 600,
+            color: theme.palette.primary.main,
+            bgcolor:
+              theme.palette.mode === 'dark'
+                ? 'rgba(255,255,255,0.08)'
+                : 'rgba(255,255,255,0.92)',
+            border: `1px solid ${theme.palette.primary.main}`,
+            borderRadius: 1,
+            cursor: 'pointer',
+            opacity: 0,
+            pointerEvents: 'none',
+            transition: 'opacity 120ms ease, background-color 120ms ease',
+            backdropFilter: 'saturate(140%) blur(2px)',
+            '&:hover': {
+              bgcolor: theme.palette.primary.main,
+              color: theme.palette.primary.contrastText
+            },
+            '&:focus-visible': {
+              outline: `2px solid ${theme.palette.primary.main}`,
+              outlineOffset: 2,
+              opacity: 1,
+              pointerEvents: 'auto'
+            }
           },
           '& hr': {
             border: 'none',
@@ -1535,6 +1676,198 @@ function errMessage(err: unknown): string {
   if (err instanceof Error) return err.message
   if (typeof err === 'string') return err
   return 'unknown error'
+}
+
+// ---------------------------------------------------------------------------
+// Markdown table extraction + edit-button injection
+// ---------------------------------------------------------------------------
+
+/**
+ * Find every GFM-style pipe table in the markdown source and return a
+ * structured representation that mirrors the TableBuilderDialog's edit
+ * model. Indices are stable in source order, so the Nth result lines
+ * up with the Nth `<table>` markdown-it renders.
+ *
+ * What counts as a table here: a header row (`| ... |`) followed by a
+ * separator row whose every cell matches `:?-+:?`, optionally followed
+ * by body rows. We deliberately stay strict — a sloppy alignment row
+ * means the user probably meant something else (e.g. an ASCII art
+ * frame), so we'd rather miss those than mis-detect.
+ *
+ * What we don't preserve: inline markdown formatting inside cells
+ * (bold, italic, links). The dialog edits cells as plain text; round-
+ * tripping inline markdown perfectly would require a full parser per
+ * cell. The escape rule for `|` inside cells (`\|`) IS round-tripped.
+ */
+function parseMarkdownTables(source: string): WikiMarkdownTable[] {
+  if (!source) return []
+  const lines = source.split(/\r?\n/)
+  const out: WikiMarkdownTable[] = []
+  let i = 0
+  while (i < lines.length) {
+    if (!isTableLine(lines[i])) {
+      i += 1
+      continue
+    }
+    if (i + 1 >= lines.length || !isTableLine(lines[i + 1])) {
+      i += 1
+      continue
+    }
+    const headerCells = splitTableRow(lines[i])
+    const sepCells = splitTableRow(lines[i + 1])
+    if (!isSeparatorRow(sepCells) || headerCells.length !== sepCells.length) {
+      i += 1
+      continue
+    }
+    const colCount = sepCells.length
+    const alignments = sepCells.map(parseAlignment)
+    const startLine = i
+    const bodyRows: string[][] = []
+    let j = i + 2
+    while (j < lines.length && isTableLine(lines[j])) {
+      const cells = splitTableRow(lines[j])
+      while (cells.length < colCount) cells.push('')
+      bodyRows.push(cells.slice(0, colCount))
+      j += 1
+    }
+    // The build-table dialog emits a synthetic empty header when the
+    // user toggles "Header row" off. Detect that on parse so reopening
+    // doesn't ghost-render an empty header row that the user never
+    // actually authored.
+    const isSyntheticHeader = headerCells.every((c) => c.trim() === '')
+    const cells: string[][] = isSyntheticHeader
+      ? bodyRows
+      : [headerCells, ...bodyRows]
+    if (cells.length === 0) {
+      // Header-only with synthetic empty header collapses to zero
+      // rows — skip rather than push an unusable empty edit.
+      i = j
+      continue
+    }
+    out.push({
+      cells,
+      alignments,
+      headerRow: !isSyntheticHeader,
+      rawMarkdown: lines.slice(startLine, j).join('\n'),
+      startLine,
+      endLine: j
+    })
+    i = j
+  }
+  return out
+}
+
+function isTableLine(line: string): boolean {
+  const t = line.trim()
+  return t.length >= 2 && t.startsWith('|') && t.endsWith('|')
+}
+
+function isSeparatorRow(cells: string[]): boolean {
+  if (cells.length === 0) return false
+  return cells.every((c) => /^:?-+:?$/.test(c.trim()))
+}
+
+function parseAlignment(cell: string): 'left' | 'center' | 'right' {
+  const t = cell.trim()
+  const left = t.startsWith(':')
+  const right = t.endsWith(':')
+  if (left && right) return 'center'
+  if (right) return 'right'
+  return 'left'
+}
+
+/**
+ * Split a `| a | b | c |` row into trimmed cell texts. Honours `\|`
+ * escape so a literal pipe inside a cell survives the split. We also
+ * undo the escape on output — the dialog edits plain text and re-
+ * applies the escape when emitting markdown.
+ */
+function splitTableRow(line: string): string[] {
+  const trimmed = line.trim()
+  if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) {
+    return [trimmed]
+  }
+  const inner = trimmed.slice(1, -1)
+  const cells: string[] = []
+  let cur = ''
+  for (let k = 0; k < inner.length; k += 1) {
+    const ch = inner[k]
+    if (ch === '\\' && inner[k + 1] === '|') {
+      cur += '|'
+      k += 1
+      continue
+    }
+    if (ch === '|') {
+      cells.push(cur.trim())
+      cur = ''
+      continue
+    }
+    cur += ch
+  }
+  cells.push(cur.trim())
+  return cells
+}
+
+/**
+ * Wrap each rendered `<table>` (up to `count` of them — extras are
+ * left untouched because we don't have parsed source for them) in a
+ * positioned container and append a hover-revealed Edit button. The
+ * actual click is dispatched by the parent's bubbling click handler
+ * which reads the `data-md-table-edit` index back. Idempotent —
+ * tables already wrapped on a previous pass are left as-is so this
+ * effect is safe to re-run on every render.
+ */
+function attachTableEditButtons(container: HTMLElement, count: number): void {
+  const tables = container.querySelectorAll('table')
+  tables.forEach((table, idx) => {
+    if (idx >= count) return
+    const existingWrap = table.parentElement
+    if (existingWrap?.classList.contains('md-table-wrap')) {
+      // Re-stamp the index in case the source order shifted.
+      existingWrap.setAttribute('data-md-table-index', String(idx))
+      const existingBtn = existingWrap.querySelector('[data-md-table-edit]')
+      if (existingBtn) {
+        existingBtn.setAttribute('data-md-table-edit', String(idx))
+      }
+      return
+    }
+    const wrap = document.createElement('div')
+    wrap.className = 'md-table-wrap'
+    wrap.setAttribute('data-md-table-index', String(idx))
+    table.parentNode?.insertBefore(wrap, table)
+    wrap.appendChild(table)
+
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'md-table-edit-btn'
+    btn.setAttribute('data-md-table-edit', String(idx))
+    btn.setAttribute('aria-label', 'Edit table')
+    btn.title = 'Edit table'
+    btn.innerHTML =
+      '<span aria-hidden="true" style="font-size:14px;line-height:1">\u270E</span>' +
+      '<span>Edit</span>'
+    wrap.appendChild(btn)
+  })
+}
+
+/**
+ * Inverse of `attachTableEditButtons` — used when the caller stops
+ * supplying an `onEditTable` handler. Removes our injected buttons
+ * and unwraps the tables so the markup matches what we'd emit from a
+ * fresh render. Keeps the rendered DOM consistent with the prop
+ * surface so downstream selectors keep working.
+ */
+function unwrapEditableTables(container: HTMLElement): void {
+  const wraps = container.querySelectorAll('.md-table-wrap')
+  wraps.forEach((wrap) => {
+    const table = wrap.querySelector('table')
+    if (!table) {
+      wrap.remove()
+      return
+    }
+    wrap.parentNode?.insertBefore(table, wrap)
+    wrap.remove()
+  })
 }
 
 /**

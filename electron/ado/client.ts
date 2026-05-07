@@ -36,6 +36,14 @@ export interface AdoRequestOptions {
   cacheTtlMs?: number
   /** Cache key override (rare). */
   cacheKey?: string
+  /**
+   * Extra request headers merged on top of the defaults
+   * (`Accept`, `Authorization`, optionally `Content-Type`). Used for
+   * concurrency-control headers like `If-Match` on wiki updates.
+   * Casing is preserved on the wire — Electron's `net` module passes
+   * header names through verbatim.
+   */
+  headers?: Record<string, string>
 }
 
 export interface AdoErrorPayload {
@@ -171,13 +179,47 @@ function parseError(status: number, bodyText: string, fallback: string): AdoApiE
       code = 'NOT_FOUND'
       break
     case 409:
+    case 412:
+      // 412 Precondition Failed is what ADO returns when the supplied
+      // If-Match eTag is stale — i.e. the page was updated by someone
+      // (or the same user in another tab) between our load and our
+      // PUT. Treat it as a CONFLICT so the renderer can surface a
+      // reload-or-overwrite prompt with the same code path used for
+      // 409s elsewhere in the API.
       code = 'CONFLICT'
       break
   }
   return new AdoApiError(code, message, status, payload)
 }
 
+export interface AdoFetchRawResult<T> {
+  data: T
+  /** Lower-cased response headers (e.g. `etag`, `retry-after`). */
+  headers: Record<string, string>
+  status: number
+}
+
 export async function adoFetch<T>(opts: AdoRequestOptions): Promise<T> {
+  const raw = await adoFetchRaw<T>(opts)
+  return raw.data
+}
+
+/**
+ * Sibling of {@link adoFetch} that surfaces response headers alongside
+ * the parsed body. Use when a caller needs information ADO encodes in
+ * a header (e.g. `ETag` for wiki page concurrency control). Otherwise
+ * prefer {@link adoFetch} — the simpler signature keeps call sites
+ * tidy.
+ *
+ * GET caching is shared with {@link adoFetch}: a hit on either function
+ * populates the same cache slot with `{ data, headers, status }`, so
+ * retrieving headers after a body-only fetch does not trigger a second
+ * network round-trip. POST/PATCH/PUT/DELETE invalidate the cache by
+ * path prefix exactly like the body-only path.
+ */
+export async function adoFetchRaw<T>(
+  opts: AdoRequestOptions
+): Promise<AdoFetchRawResult<T>> {
   const method = opts.method ?? 'GET'
   const baseUrl = opts.baseUrl ?? (await getStoredOrganizationUrl())
   if (!baseUrl) {
@@ -195,7 +237,7 @@ export async function adoFetch<T>(opts: AdoRequestOptions): Promise<T> {
     const key = opts.cacheKey ?? url
     const hit = cache.get(key)
     if (hit && hit.expiresAt > Date.now()) {
-      return hit.value as T
+      return hit.value as AdoFetchRawResult<T>
     }
     const value = await execute<T>(method, url, opts, token)
     cache.set(key, { value, expiresAt: Date.now() + ttl })
@@ -213,7 +255,7 @@ async function execute<T>(
   url: string,
   opts: AdoRequestOptions,
   token: string
-): Promise<T> {
+): Promise<AdoFetchRawResult<T>> {
   const headers: Record<string, string> = {
     Accept: 'application/json',
     Authorization: authHeader(token)
@@ -223,6 +265,15 @@ async function execute<T>(
     headers['Content-Type'] = opts.contentType ?? 'application/json'
     body = JSON.stringify(opts.body)
   }
+  // Caller-supplied headers go last so they can override defaults if
+  // ever needed (e.g. forcing a different Accept type). Auth is still
+  // protected because this map exists at the call-site; nobody outside
+  // this module sets Authorization through here.
+  if (opts.headers) {
+    for (const [k, v] of Object.entries(opts.headers)) {
+      headers[k] = v
+    }
+  }
 
   let attempt = 0
   let lastErr: Error | undefined
@@ -230,12 +281,17 @@ async function execute<T>(
     try {
       const res = await performRequest(url, { method, headers, body })
       if (res.status >= 200 && res.status < 300) {
-        if (!res.bodyText) return undefined as T
-        try {
-          return JSON.parse(res.bodyText) as T
-        } catch {
-          return res.bodyText as unknown as T
+        let data: T
+        if (!res.bodyText) {
+          data = undefined as T
+        } else {
+          try {
+            data = JSON.parse(res.bodyText) as T
+          } catch {
+            data = res.bodyText as unknown as T
+          }
         }
+        return { data, headers: res.headers, status: res.status }
       }
       if (isRetriable(res.status) && attempt < MAX_RETRIES) {
         const retryAfter = Number(res.headers['retry-after'])

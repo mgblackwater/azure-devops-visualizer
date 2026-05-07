@@ -185,6 +185,15 @@ export interface AdoWikiPage {
   url?: string
   /** Recursive child pages when fetched with recursionLevel=Full. */
   subPages?: AdoWikiPage[]
+  /**
+   * Server-supplied version tag for this page, used to drive the
+   * `If-Match` header on subsequent `PUT` updates. ADO returns the
+   * eTag in the `ETag` response header on both GET and PUT for wiki
+   * pages — the main process pulls it off the raw response and
+   * propagates it on the typed page object. Undefined when the page
+   * was loaded via a path-tree call (which doesn't expose it).
+   */
+  eTag?: string
 }
 
 /**

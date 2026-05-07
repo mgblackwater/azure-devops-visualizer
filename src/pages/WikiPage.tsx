@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   Alert,
@@ -7,13 +7,21 @@ import {
   Button,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
   IconButton,
   InputAdornment,
   Skeleton,
   Stack,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
-  Typography
+  Typography,
+  useTheme
 } from '@mui/material'
 import SearchIcon from '@mui/icons-material/Search'
 import ClearIcon from '@mui/icons-material/Clear'
@@ -22,19 +30,35 @@ import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import DescriptionIcon from '@mui/icons-material/Description'
 import FolderOpenIcon from '@mui/icons-material/FolderOpen'
+import TableChartOutlinedIcon from '@mui/icons-material/TableChartOutlined'
+import VisibilityOutlinedIcon from '@mui/icons-material/VisibilityOutlined'
+import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import DOMPurify from 'dompurify'
+import CodeMirror, { type ReactCodeMirrorRef } from '@uiw/react-codemirror'
+import { markdown as cmMarkdown } from '@codemirror/lang-markdown'
+import { oneDark } from '@codemirror/theme-one-dark'
+import { EditorView } from '@codemirror/view'
 import {
   useGetConnectionQuery,
   useGetWikiPageQuery,
   useGetWikiPageTreeQuery,
   useListWikisQuery,
-  useSearchWikiQuery
+  useSearchWikiQuery,
+  useUpdateWikiPageMutation
 } from '@/store/api/adoApi'
 import { useAppSelector } from '@/store'
 import { IPC } from '@shared/contract'
 import type { AdoWiki, AdoWikiPage } from '@shared/adoTypes'
 import MarkdownView from '@/components/wiki/MarkdownView'
+import type { WikiMarkdownTable } from '@/components/wiki/MarkdownView'
+import TableBuilderDialog from '@/components/wiki/TableBuilderDialog'
+import type { TableBuilderInitialData } from '@/components/wiki/TableBuilderDialog'
 import FavoriteButton from '@/components/common/FavoriteButton'
+import {
+  appendTableToPage,
+  insertAtCursor,
+  replaceTableInPage
+} from '@/components/wiki/wikiSourceUtils'
 
 const SIDEBAR_WIDTH = 320
 const SEARCH_DEBOUNCE_MS = 300
@@ -685,6 +709,36 @@ function renderHighlightedLabel(
 /* page pane (right side)                                               */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Edit-mode "open table dialog" intent. View mode (`'replace'`) carries
+ * an existing table's source range so the eventual splice writes over
+ * the right block; edit mode never carries one — the cursor offset is
+ * read live from the editor view ref at save time.
+ *
+ * `'append'` is the View-mode "Add table" path: the new markdown is
+ * concatenated to the page tail.
+ *
+ * `'cursor'` is the Edit-mode "Add table" path: the new markdown is
+ * inserted at the CodeMirror cursor and the buffer is marked dirty,
+ * but no IPC fires until the user clicks Save.
+ */
+type TableDialogTarget =
+  | { kind: 'append' }
+  | { kind: 'replace'; startLine: number; endLine: number }
+  | { kind: 'cursor' }
+
+interface ConflictState {
+  /** Content the user tried to commit when the 412 came back. */
+  content: string
+  /**
+   * True when the conflict has already been overwritten once and the
+   * server still responded 412. We stop offering the Overwrite path
+   * to avoid an infinite ping-pong; the user has to copy their text
+   * out manually. The spec explicitly forbids retry loops here.
+   */
+  fatal?: boolean
+}
+
 function WikiPagePane({
   projectId,
   projectName,
@@ -706,6 +760,254 @@ function WikiPagePane({
     { projectId, wikiId, path },
     { skip: !projectId || !wikiId || !path }
   )
+  const [updateWikiPage] = useUpdateWikiPageMutation()
+  const muiTheme = useTheme()
+  const isDark = muiTheme.palette.mode === 'dark'
+
+  const [mode, setMode] = useState<'view' | 'edit'>('view')
+  // Editor buffer — lives separately from the cached query data so the
+  // user's in-flight edits aren't blown away when RTK refetches the
+  // underlying page (e.g. after a sibling tab triggers an invalidation
+  // and our query refreshes silently in the background).
+  const [editorContent, setEditorContent] = useState<string>('')
+  // Snapshot of editor content on entry to edit mode; the diff against
+  // the live editor state is the only source of truth for the dirty
+  // bit. Comparing against `pageQ.data?.content` directly would flicker
+  // mid-save (since that field updates after the mutation invalidates
+  // the cache) and falsely report dirty=true again immediately after.
+  const [editorBaseline, setEditorBaseline] = useState<string>('')
+  // CodeMirror view ref: needed to read the cursor offset for edit-mode
+  // "Add table" without forcing a focus-track + offset state branch.
+  const cmRef = useRef<ReactCodeMirrorRef | null>(null)
+
+  // Table-builder dialog state. `target` describes what should happen
+  // when the user clicks the dialog's Save button — see TableDialogTarget.
+  const [tableBuilderOpen, setTableBuilderOpen] = useState(false)
+  const [tableInitialData, setTableInitialData] =
+    useState<TableBuilderInitialData | null>(null)
+  const [tableTarget, setTableTarget] = useState<TableDialogTarget>({
+    kind: 'append'
+  })
+
+  const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false)
+  const [conflict, setConflict] = useState<ConflictState | null>(null)
+  const [overwriteInFlight, setOverwriteInFlight] = useState(false)
+  const [savingEditor, setSavingEditor] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  const dirty = mode === 'edit' && editorContent !== editorBaseline
+
+  // Reset all transient state when the user navigates to a different
+  // page. Without this, opening page B while edit mode was active on
+  // page A would keep B in edit mode with A's stale buffer.
+  useEffect(() => {
+    setMode('view')
+    setEditorContent('')
+    setEditorBaseline('')
+    setSaveError(null)
+    setConflict(null)
+    setOverwriteInFlight(false)
+    setSavingEditor(false)
+    setTableBuilderOpen(false)
+    setDiscardConfirmOpen(false)
+  }, [wikiId, path])
+
+  function enterEditMode(): void {
+    const seed = pageQ.data?.content ?? ''
+    setEditorContent(seed)
+    setEditorBaseline(seed)
+    setSaveError(null)
+    setMode('edit')
+  }
+
+  function attemptExitEditMode(): void {
+    if (dirty) {
+      setDiscardConfirmOpen(true)
+      return
+    }
+    setMode('view')
+  }
+
+  function discardAndExitEditMode(): void {
+    setDiscardConfirmOpen(false)
+    setEditorContent(editorBaseline)
+    setSaveError(null)
+    setMode('view')
+  }
+
+  function handleEditTableClick(table: WikiMarkdownTable): void {
+    // Edit-table affordance only appears in view mode (we don't pass
+    // `onEditTable` into MarkdownView while editing), so we don't need
+    // a defensive mode check — but we still pin the splice range to
+    // the current parse to avoid drift if the cache shifts between
+    // the click and the dialog Save.
+    setTableInitialData({
+      cells: table.cells,
+      alignments: table.alignments,
+      headerRow: table.headerRow
+    })
+    setTableTarget({
+      kind: 'replace',
+      startLine: table.startLine,
+      endLine: table.endLine
+    })
+    setTableBuilderOpen(true)
+  }
+
+  function handleAddTableClick(): void {
+    setTableInitialData(null)
+    setTableTarget(mode === 'edit' ? { kind: 'cursor' } : { kind: 'append' })
+    setTableBuilderOpen(true)
+  }
+
+  function handleCloseTableBuilder(): void {
+    setTableBuilderOpen(false)
+    // Defer clearing the seed data until the dialog has finished its
+    // close transition so the title doesn't flicker from "Edit table"
+    // back to "Build markdown table" mid-fade.
+    window.setTimeout(() => setTableInitialData(null), 200)
+  }
+
+  /**
+   * Run a wiki PUT and translate a 412 into our local conflict state.
+   * Returns `true` on success, `false` if a conflict was raised (the
+   * caller can then close any in-flight dialog without showing an
+   * inline error — the conflict modal takes over the screen). Other
+   * errors propagate so the dialog's inline alert can render them.
+   */
+  const writeContent = useCallback(
+    async (content: string, eTagOverride?: string): Promise<boolean> => {
+      const eTag = eTagOverride ?? pageQ.data?.eTag
+      try {
+        await updateWikiPage({
+          projectId,
+          wikiId,
+          path,
+          content,
+          eTag
+        }).unwrap()
+        return true
+      } catch (err) {
+        if (isConflictError(err)) {
+          setConflict({ content })
+          return false
+        }
+        throw err
+      }
+    },
+    [updateWikiPage, projectId, wikiId, path, pageQ.data?.eTag]
+  )
+
+  async function handleTableDialogSave(markdown: string): Promise<void> {
+    const target = tableTarget
+    if (target.kind === 'cursor') {
+      // Edit mode: splice into the buffer at the editor cursor and
+      // mark dirty. No IPC — the user commits via the toolbar Save.
+      const offset =
+        cmRef.current?.view?.state.selection.main.head ?? editorContent.length
+      const next = insertAtCursor(editorContent, offset, markdown)
+      setEditorContent(next)
+      // Resolved → dialog closes itself.
+      return
+    }
+    if (target.kind === 'append') {
+      const nextContent = appendTableToPage(
+        pageQ.data?.content ?? '',
+        markdown
+      )
+      const ok = await writeContent(nextContent)
+      if (!ok) {
+        // Conflict — close the table dialog quietly, the conflict
+        // modal will fire on its own. Avoid surfacing an alert inside
+        // the dialog (the user is about to interact with the conflict
+        // modal instead).
+        setTableBuilderOpen(false)
+      }
+      return
+    }
+    // target.kind === 'replace'
+    const sourceForSplice = pageQ.data?.content ?? ''
+    const nextContent = replaceTableInPage(
+      sourceForSplice,
+      target.startLine,
+      target.endLine,
+      markdown
+    )
+    const ok = await writeContent(nextContent)
+    if (!ok) {
+      setTableBuilderOpen(false)
+    }
+  }
+
+  async function handleEditorSave(): Promise<void> {
+    if (!dirty || savingEditor) return
+    setSaveError(null)
+    setSavingEditor(true)
+    try {
+      const ok = await writeContent(editorContent)
+      if (ok) {
+        setEditorBaseline(editorContent)
+        setMode('view')
+      }
+    } catch (err) {
+      setSaveError(messageOfError(err))
+    } finally {
+      setSavingEditor(false)
+    }
+  }
+
+  /**
+   * Conflict modal Reload — drop the local edit and refetch. RTK
+   * Query's `refetch` clears the error state and pulls a fresh page
+   * (including a new eTag), so subsequent saves start from a clean
+   * baseline.
+   */
+  function handleConflictReload(): void {
+    setConflict(null)
+    setSaveError(null)
+    setEditorContent('')
+    setEditorBaseline('')
+    setMode('view')
+    void pageQ.refetch()
+  }
+
+  /**
+   * Conflict modal Overwrite — refetch to capture the latest eTag,
+   * then re-run the mutation with the user's content + that eTag.
+   * Mirrors what ADO's own web UI does internally; resolving the
+   * conflict server-side instead of forcing a manual diff is the
+   * expected outcome the user signed up for when they clicked
+   * Overwrite.
+   */
+  async function handleConflictOverwrite(): Promise<void> {
+    if (!conflict || overwriteInFlight) return
+    setOverwriteInFlight(true)
+    try {
+      const fresh = await pageQ.refetch().unwrap()
+      const ok = await writeContent(conflict.content, fresh.eTag)
+      if (ok) {
+        setConflict(null)
+        if (mode === 'edit') {
+          setEditorBaseline(conflict.content)
+          setMode('view')
+        }
+        setSaveError(null)
+      } else {
+        // writeContent already re-set the conflict, but we want to
+        // mark it fatal so the modal stops offering Overwrite. Loops
+        // here are explicitly forbidden by the spec.
+        setConflict({ content: conflict.content, fatal: true })
+      }
+    } catch (err) {
+      setConflict({
+        content: conflict.content,
+        fatal: true
+      })
+      setSaveError(messageOfError(err))
+    } finally {
+      setOverwriteInFlight(false)
+    }
+  }
 
   const breadcrumbs = useMemo(() => {
     return path
@@ -731,6 +1033,16 @@ function WikiPagePane({
     ? ((pageQ.error as { data?: { message?: string } }).data?.message ??
         'Failed to load page.')
     : null
+
+  // Pick a Save-button label that matches what the table-builder Save
+  // is about to do; users get clearer feedback when the verb in the
+  // dialog matches the eventual outcome.
+  const tableBuilderSaveLabel =
+    tableTarget.kind === 'cursor'
+      ? 'Insert at cursor'
+      : tableTarget.kind === 'replace'
+        ? 'Save to wiki'
+        : 'Add to page'
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -819,6 +1131,80 @@ function WikiPagePane({
           projectId={projectId}
           meta={{ wikiId, wikiName, path }}
         />
+        <ToggleButtonGroup
+          size="small"
+          exclusive
+          value={mode}
+          onChange={(_e, value) => {
+            if (!value || value === mode) return
+            if (value === 'edit') {
+              enterEditMode()
+            } else {
+              attemptExitEditMode()
+            }
+          }}
+          aria-label="Wiki page view mode"
+          sx={{ height: 30 }}
+        >
+          <ToggleButton value="view" aria-label="View mode">
+            <VisibilityOutlinedIcon fontSize="small" sx={{ mr: 0.5 }} />
+            View
+          </ToggleButton>
+          <ToggleButton value="edit" aria-label="Edit mode">
+            <EditOutlinedIcon fontSize="small" sx={{ mr: 0.5 }} />
+            Edit
+          </ToggleButton>
+        </ToggleButtonGroup>
+        <Tooltip
+          title={
+            mode === 'edit'
+              ? 'Insert a markdown table at the cursor'
+              : 'Append a markdown table to the page'
+          }
+        >
+          <span>
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<TableChartOutlinedIcon fontSize="small" />}
+              onClick={handleAddTableClick}
+              disabled={pageQ.isLoading || !!errorMessage}
+            >
+              Add table
+            </Button>
+          </span>
+        </Tooltip>
+        {mode === 'edit' && (
+          <Tooltip
+            title={
+              dirty
+                ? 'Save your edits to the wiki'
+                : 'Nothing to save — the editor matches the page'
+            }
+          >
+            <span>
+              <Button
+                size="small"
+                variant="contained"
+                onClick={() => {
+                  void handleEditorSave()
+                }}
+                disabled={!dirty || savingEditor}
+                startIcon={
+                  savingEditor ? (
+                    <CircularProgress
+                      size={14}
+                      thickness={5}
+                      sx={{ color: 'inherit' }}
+                    />
+                  ) : undefined
+                }
+              >
+                Save
+              </Button>
+            </span>
+          </Tooltip>
+        )}
         {externalUrl && (
           <Button
             size="small"
@@ -831,9 +1217,50 @@ function WikiPagePane({
         )}
       </Box>
 
-      <Box sx={{ flex: 1, p: 3, minHeight: 0 }}>
+      <TableBuilderDialog
+        open={tableBuilderOpen}
+        onClose={handleCloseTableBuilder}
+        initialData={tableInitialData}
+        onSave={handleTableDialogSave}
+        saveLabel={tableBuilderSaveLabel}
+      />
+
+      <Dialog
+        open={discardConfirmOpen}
+        onClose={() => setDiscardConfirmOpen(false)}
+      >
+        <DialogTitle>Discard unsaved changes?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            You have unsaved edits in the markdown editor. Switching back
+            to View will discard them. Save first if you want to keep your
+            changes.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDiscardConfirmOpen(false)}>
+            Keep editing
+          </Button>
+          <Button color="warning" onClick={discardAndExitEditMode}>
+            Discard
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <ConflictDialog
+        open={!!conflict}
+        fatal={!!conflict?.fatal}
+        overwriting={overwriteInFlight}
+        onReload={handleConflictReload}
+        onOverwrite={() => {
+          void handleConflictOverwrite()
+        }}
+        onClose={() => setConflict(null)}
+      />
+
+      <Box sx={{ flex: 1, p: mode === 'edit' ? 0 : 3, minHeight: 0 }}>
         {pageQ.isLoading && (
-          <Stack spacing={1.5}>
+          <Stack spacing={1.5} sx={{ p: mode === 'edit' ? 3 : 0 }}>
             <Skeleton variant="text" width="40%" height={32} />
             <Skeleton variant="rectangular" height={20} />
             <Skeleton variant="rectangular" height={20} />
@@ -842,9 +1269,11 @@ function WikiPagePane({
           </Stack>
         )}
         {errorMessage && (
-          <Alert severity="error">{errorMessage}</Alert>
+          <Alert severity="error" sx={{ m: mode === 'edit' ? 3 : 0 }}>
+            {errorMessage}
+          </Alert>
         )}
-        {!pageQ.isLoading && !errorMessage && (
+        {!pageQ.isLoading && !errorMessage && mode === 'view' && (
           <MarkdownView
             markdown={pageQ.data?.content ?? ''}
             wikiId={wikiId}
@@ -852,11 +1281,181 @@ function WikiPagePane({
             projectId={projectId}
             wikiRepositoryId={wikiRepositoryId}
             currentPagePath={path}
+            onEditTable={handleEditTableClick}
           />
+        )}
+        {!pageQ.isLoading && !errorMessage && mode === 'edit' && (
+          <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            {saveError && (
+              <Alert
+                severity="error"
+                onClose={() => setSaveError(null)}
+                sx={{ mx: 3, mt: 2 }}
+              >
+                {saveError}
+              </Alert>
+            )}
+            <Box
+              sx={{
+                flex: 1,
+                minHeight: 0,
+                // CodeMirror has its own scrolling; fill the pane
+                // edge-to-edge so the editor visually replaces the
+                // rendered preview without an awkward inset.
+                '& .cm-editor': {
+                  height: '100%',
+                  fontSize: 13.5
+                },
+                '& .cm-scroller': {
+                  fontFamily:
+                    'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
+                }
+              }}
+            >
+              <CodeMirror
+                ref={cmRef}
+                value={editorContent}
+                onChange={(value) => setEditorContent(value)}
+                height="100%"
+                theme={isDark ? oneDark : undefined}
+                extensions={[cmMarkdown(), EditorView.lineWrapping]}
+                basicSetup={{
+                  lineNumbers: true,
+                  highlightActiveLine: true,
+                  foldGutter: false,
+                  bracketMatching: true,
+                  autocompletion: false,
+                  highlightSelectionMatches: false
+                }}
+              />
+            </Box>
+          </Box>
         )}
       </Box>
     </Box>
   )
+}
+
+/* ------------------------------------------------------------------ */
+/* conflict dialog                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Modal shown when ADO rejects a wiki PUT with 412 (Precondition
+ * Failed) — i.e. someone (the user, in another tab, or a different
+ * editor entirely) updated the page after we loaded it. Offers the
+ * two reasonable resolutions: throw away the local edit and reload
+ * the server's version, or force-overwrite (which the caller
+ * implements by re-fetching the page to capture the fresh eTag, then
+ * re-running the mutation against that).
+ *
+ * When `fatal` is true we already tried the Overwrite path once and
+ * still got a conflict; the user has to copy their content out and
+ * try again manually. Avoiding a retry loop here is intentional —
+ * looping puts the renderer at the mercy of whoever else is editing,
+ * with no path to drain.
+ */
+function ConflictDialog({
+  open,
+  fatal,
+  overwriting,
+  onReload,
+  onOverwrite,
+  onClose
+}: {
+  open: boolean
+  fatal: boolean
+  overwriting: boolean
+  onReload: () => void
+  onOverwrite: () => void
+  onClose: () => void
+}): JSX.Element {
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle>This page changed in Azure DevOps</DialogTitle>
+      <DialogContent>
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          The wiki page was updated by someone else (or in another tab)
+          since you loaded it. Saving now would either overwrite their
+          changes or be rejected by the server.
+        </Alert>
+        {fatal ? (
+          <DialogContentText>
+            We tried to reconcile and Azure DevOps rejected the update
+            again — likely another concurrent edit landed in the very
+            short window. Copy your edits out of the editor manually,
+            click <strong>Reload page</strong> to pull the latest version,
+            and re-apply your changes.
+          </DialogContentText>
+        ) : (
+          <DialogContentText>
+            <strong>Reload page</strong> discards your local edits and
+            shows the latest version from Azure DevOps.
+            <br />
+            <strong>Overwrite anyway</strong> replaces the server's
+            version with your local edits, losing whatever the other
+            person changed. There is no undo.
+          </DialogContentText>
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onReload} disabled={overwriting}>
+          Reload page
+        </Button>
+        {!fatal && (
+          <Button
+            onClick={onOverwrite}
+            color="warning"
+            variant="contained"
+            disabled={overwriting}
+            startIcon={
+              overwriting ? (
+                <CircularProgress
+                  size={14}
+                  thickness={5}
+                  sx={{ color: 'inherit' }}
+                />
+              ) : undefined
+            }
+          >
+            Overwrite anyway
+          </Button>
+        )}
+        {fatal && (
+          <Button onClick={onClose} variant="contained">
+            Close
+          </Button>
+        )}
+      </DialogActions>
+    </Dialog>
+  )
+}
+
+/**
+ * Detect the structured `IpcError` shape that bubbles through RTK
+ * Query's `unwrap()` rejection. The renderer's base query normalises
+ * everything into `{ status, data: IpcError }`, so a 412 from ADO ends
+ * up at `err.data.code === 'CONFLICT'`. We also accept a bare
+ * `{ code }` shape for defensive coverage.
+ */
+function isConflictError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false
+  const e = err as { data?: { code?: string }; code?: string }
+  if (e.data?.code === 'CONFLICT') return true
+  if (e.code === 'CONFLICT') return true
+  return false
+}
+
+function messageOfError(err: unknown): string {
+  if (!err) return 'Unknown error'
+  if (typeof err === 'string') return err
+  if (err instanceof Error) return err.message
+  if (typeof err === 'object') {
+    const e = err as { data?: { message?: string }; message?: string }
+    if (e.data?.message) return e.data.message
+    if (e.message) return e.message
+  }
+  return 'Unknown error'
 }
 
 /* ------------------------------------------------------------------ */

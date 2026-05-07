@@ -16,12 +16,14 @@ import {
 } from '../ado/client'
 import {
   listIterations,
+  listProjectMemberIdentities,
   listProjects,
   listSavedQueries,
   listTeamMembers,
   listTeams
 } from '../ado/projects'
 import {
+  addComment,
   batchGetWorkItems,
   getLatestMentions,
   getWorkItemWithRelations,
@@ -35,7 +37,8 @@ import {
   getPageTree,
   getWikiPage,
   listWikis,
-  searchWiki
+  searchWiki,
+  updatePage as updateWikiPage
 } from '../ado/wiki'
 
 type Handler = (...args: unknown[]) => Promise<unknown> | unknown
@@ -213,6 +216,19 @@ export function registerIpcHandlers(ipcMain: IpcMain): void {
 
     [IPC.WikiSearch]: (_e, args) =>
       wrap(() => searchWiki(args as Parameters<typeof searchWiki>[0])),
+
+    [IPC.WikiUpdatePage]: (_e, args) =>
+      wrap(() => updateWikiPage(args as Parameters<typeof updateWikiPage>[0])),
+
+    [IPC.WorkItemAddComment]: (_e, args) =>
+      wrap(() => addComment(args as Parameters<typeof addComment>[0])),
+
+    [IPC.IdentitySearch]: (_e, args) => {
+      const a = args as { projectId: string }
+      return wrap(async () => ({
+        identities: await listProjectMemberIdentities(a.projectId)
+      }))
+    },
 
     [IPC.ShellOpenExternal]: (_e, args) =>
       wrap(async () => {
