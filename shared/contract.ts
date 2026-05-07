@@ -22,7 +22,8 @@ import type {
   AdoWikiPage,
   AdoWikiSearchHit,
   AdoWiqlResult,
-  AdoWorkItem
+  AdoWorkItem,
+  PullRequestChangesSummary
 } from './adoTypes'
 
 /**
@@ -173,7 +174,22 @@ export const IPC = {
    */
   PreferencesWrite: 'preferences.write',
 
-  ShellOpenExternal: 'shell.openExternal'
+  ShellOpenExternal: 'shell.openExternal',
+
+  /* ---------- v0.3.1 additions (WhatsApp share on PR rows) ---------- */
+  // Appended at the bottom so a parallel branch (system tray + 1-min
+  // poll notifications) can add `NotificationOpenTarget` here without
+  // colliding line-by-line. Keep new v0.3.1 channels in this delimited
+  // block until the merge settles.
+  /**
+   * Per-PR file-change summary used by the WhatsApp-share dialog to
+   * compose a "Please review when free" message with a quick rundown
+   * of the diff. Backed by ADO's pull-request iteration-changes
+   * endpoint; cached on the same key the existing `PullRequestsList`
+   * cache uses so toggling the dialog open / shut for the same PR
+   * doesn't re-hit the network.
+   */
+  GitPullRequestChanges: 'git.pr.changes'
 } as const
 
 /**
@@ -481,6 +497,20 @@ export interface IdentitySearchByQueryResult {
   queryEcho: string
 }
 
+/* ---------- v0.3.1 additions (WhatsApp share on PR rows) ---------- */
+// Appended at the bottom so the parallel tray-notifications branch can
+// add its own payload types here without three-way merge pain.
+
+export interface GetPullRequestChangesArgs {
+  projectId: string
+  repositoryId: string
+  pullRequestId: number
+}
+
+export interface GetPullRequestChangesResult {
+  summary: PullRequestChangesSummary
+}
+
 /* ---------- channel signature map (request -> response) ---------- */
 
 export interface IpcSignatures {
@@ -550,6 +580,12 @@ export interface IpcSignatures {
   [IPC.PreferencesWrite]: { args: WritePreferencesArgs; result: WritePreferencesResult }
 
   [IPC.ShellOpenExternal]: { args: ShellOpenExternalArgs; result: { ok: true } }
+
+  /* ---- v0.3.1 additions (WhatsApp share on PR rows) ---- */
+  [IPC.GitPullRequestChanges]: {
+    args: GetPullRequestChangesArgs
+    result: GetPullRequestChangesResult
+  }
 }
 
 export type IpcArgs<C extends IpcChannel> = IpcSignatures[C]['args']
@@ -580,6 +616,15 @@ export interface AdoBridge {
   invoke<C extends IpcChannel>(channel: C, args?: IpcArgs<C>): Promise<IpcResult<C>>
   /** Listen for unsolicited events from main (e.g. token cleared). */
   on(event: 'connection-changed', handler: (info: AdoConnectionInfo) => void): () => void
+  /**
+   * Listen for a "deep-link" push from main when the user clicks a
+   * native notification, picks a tray menu item, etc. The renderer
+   * should focus the right page and (where possible) drill into the
+   * targeted PR or work item. This event is renderer-bound (main →
+   * renderer) and intentionally lives outside `IpcSignatures` so it
+   * doesn't leak into the typed `invoke` map.
+   */
+  on(event: 'open-target', handler: (target: NotificationOpenTarget) => void): () => void
   /** Disk-backed preferences store; replaces localStorage for persisted state. */
   preferences: PreferencesBridge
 }
@@ -589,3 +634,63 @@ declare global {
     ado: AdoBridge
   }
 }
+
+/* ==========================================================================
+ *  v0.3.1 — tray + 1-min poll notifications
+ *  --------------------------------------------------------------------------
+ *  Additions live in their own block at the bottom of the file so they
+ *  cleanly merge with parallel work that is also appending to this file
+ *  (notably the WhatsApp-share branch's `IPC.GitPullRequestChanges`
+ *  channel). Both blocks are append-only — keep your additions inside
+ *  the marker comments so a three-way merge resolves automatically.
+ * ========================================================================== */
+
+/**
+ * Renderer-bound IPC event names for v0.3.1. These travel as one-way
+ * `webContents.send` pushes — they are NOT registered with
+ * `ipcMain.handle` and intentionally don't appear in `IpcSignatures`
+ * (which only types `invoke`-style request/response channels).
+ *
+ * Kept as standalone exports rather than added to the `IPC` object
+ * above so this whole v0.3.1 block stays append-only and merges cleanly
+ * with the parallel `IPC.GitPullRequestChanges` addition.
+ */
+export const RENDERER_EVENT = {
+  /** Main → renderer: open a specific PR / work item / Home tab. */
+  NotificationOpenTarget: 'open-target'
+} as const
+
+/**
+ * Renderer-bound deep-link push from the main process. Sent when:
+ *   - The user clicks a native desktop notification fired by the
+ *     background poller (PR awaiting review / new @-mention).
+ *   - The user picks an "Open Pull Requests" / "Open Mentions" item
+ *     from the tray menu.
+ *
+ * The payload describes *what* to open; the renderer is responsible
+ * for routing + selecting + opening drawers as best-effort. If the
+ * project isn't currently selected, the renderer should still navigate
+ * to /home and let the user pick — the open is never blocked on
+ * reconciling project state.
+ */
+export type NotificationOpenTarget =
+  | {
+      kind: 'pr'
+      /** ADO numeric PR id. */
+      id: number
+      projectId: string
+      repositoryId?: string
+    }
+  | {
+      kind: 'workItem'
+      /** ADO numeric work-item id. */
+      id: number
+      projectId: string
+    }
+  | {
+      /** Tray-menu jump that doesn't carry a single record id. */
+      kind: 'tab'
+      /** Which Home tab to surface. */
+      tab: 'pullRequests' | 'mentions'
+    }
+

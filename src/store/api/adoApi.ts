@@ -5,6 +5,8 @@ import {
 } from '@reduxjs/toolkit/query/react'
 import {
   IPC,
+  type GetPullRequestChangesArgs,
+  type GetPullRequestChangesResult,
   type IpcArgs,
   type IpcChannel,
   type ListPullRequestsArgs,
@@ -102,7 +104,8 @@ export const adoApi = createApi({
     'Wikis',
     'WikiPage',
     'PullRequest',
-    'GitRepository'
+    'GitRepository',
+    'PullRequestChanges'
   ],
   endpoints: (build) => ({
     getConnection: build.query<AdoConnectionInfo, void>({
@@ -431,6 +434,27 @@ export const adoApi = createApi({
       query: (args) => ({ channel: IPC.GitRepositoriesList, args }),
       providesTags: ['GitRepository'],
       keepUnusedDataFor: 300
+    }),
+
+    /**
+     * File-change summary for a single PR's latest iteration. Backs
+     * the WhatsApp-share dialog's "Include details" toggle — fired
+     * lazily (`skip: !showDetails`) so opening the dialog doesn't
+     * round-trip until the user actually asks for the file list.
+     *
+     * Cached for five minutes to match the main-process cache: the
+     * iteration id is stable until a new push lands, and the dialog's
+     * close-and-reopen flow shouldn't re-hit the network in that
+     * window. Tagged so a future "refresh PR" mutation can invalidate
+     * just this slice.
+     */
+    getPullRequestChangesSummary: build.query<
+      GetPullRequestChangesResult,
+      GetPullRequestChangesArgs
+    >({
+      query: (args) => ({ channel: IPC.GitPullRequestChanges, args }),
+      providesTags: ['PullRequestChanges'],
+      keepUnusedDataFor: 300
     })
   })
 })
@@ -462,5 +486,6 @@ export const {
   useGetProjectMembersQuery,
   useSearchIdentitiesByQueryQuery,
   useListPullRequestsQuery,
-  useListRepositoriesQuery
+  useListRepositoriesQuery,
+  useGetPullRequestChangesSummaryQuery
 } = adoApi

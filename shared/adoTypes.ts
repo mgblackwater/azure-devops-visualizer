@@ -329,3 +329,69 @@ export interface IpcError {
   status?: number
   details?: unknown
 }
+
+/* ---------- pull request changes (v0.3.1: WhatsApp share) ---------- */
+
+/**
+ * One iteration of a pull request — ADO numbers iterations from 1 and
+ * adds a new one each time the source branch is force-pushed or merged
+ * into. We pull the *latest* iteration when summarising changes so the
+ * file list reflects the PR's current diff rather than its first push.
+ *
+ * Mirrors `_apis/git/repositories/{repo}/pullRequests/{prId}/iterations`.
+ * Only the bits the changes-summary feature actually consumes are
+ * modelled here.
+ */
+export interface AdoPullRequestIteration {
+  id: number
+  description?: string
+  createdDate?: string
+  updatedDate?: string
+}
+
+/**
+ * Normalised change-type for a single file in a pull request. ADO
+ * returns this as a comma-separated string (`'edit'`,
+ * `'delete,sourceRename'`, etc.); we collapse the variants the UI
+ * cares about into a small enum and lump everything unrecognised under
+ * `'other'` so a future ADO addition doesn't crash the row.
+ *
+ * `'sourceRename'` and `'targetRename'` both map to `'rename'`.
+ */
+export type AdoPullRequestChangeKind =
+  | 'add'
+  | 'edit'
+  | 'delete'
+  | 'rename'
+  | 'other'
+
+/**
+ * One file's change record inside a PR iteration. The iteration-changes
+ * REST endpoint does NOT include line counts (those live on the
+ * heavier per-commit / diff endpoints) — `addedLines` / `deletedLines`
+ * are therefore optional and currently always `undefined` in v0.3.1.
+ * Marked here so the UI can already render line counts when a future
+ * version starts populating them without another contract change.
+ */
+export interface AdoPullRequestChange {
+  path: string
+  changeType: AdoPullRequestChangeKind
+  /** Reserved for a future polish — see `pullRequests.ts` TODO. */
+  addedLines?: number
+  /** Reserved for a future polish — see `pullRequests.ts` TODO. */
+  deletedLines?: number
+}
+
+/**
+ * Compact summary of every file touched by a PR's latest iteration.
+ * Built in the main process so the renderer can format the share
+ * message without a second round-trip. `totalAdded` / `totalDeleted`
+ * are optional for the same reason `addedLines` is on the per-file
+ * shape — they'll only land once line counts are wired in.
+ */
+export interface PullRequestChangesSummary {
+  totalFiles: number
+  totalAdded?: number
+  totalDeleted?: number
+  files: AdoPullRequestChange[]
+}

@@ -24,7 +24,9 @@ import RemoveIcon from '@mui/icons-material/Remove'
 import WarningAmberIcon from '@mui/icons-material/WarningAmber'
 import EditNoteIcon from '@mui/icons-material/EditNote'
 import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined'
+import WhatsAppIcon from '@mui/icons-material/WhatsApp'
 import { IPC } from '@shared/contract'
+import WhatsAppShareDialog from './WhatsAppShareDialog'
 import type {
   AdoGitRepository,
   AdoPullRequest,
@@ -369,6 +371,8 @@ export default function PullRequestsList({
                 pr={pr}
                 onOpen={handleOpen}
                 disabled={!orgUrl}
+                orgUrl={orgUrl}
+                projectId={projectId}
               />
             ))}
           </Box>
@@ -384,9 +388,20 @@ interface PullRequestRowProps {
   /** When true, the row still renders but isn't clickable (e.g. no
    *  org URL available so we can't build the external link). */
   disabled?: boolean
+  /** Org base URL used to build the ADO PR link for the share dialog. */
+  orgUrl?: string
+  /** Project id forwarded to the share dialog so it can fetch the
+   *  per-PR file-change summary on demand. */
+  projectId: string
 }
 
-function PullRequestRow({ pr, onOpen, disabled }: PullRequestRowProps): JSX.Element {
+function PullRequestRow({
+  pr,
+  onOpen,
+  disabled,
+  orgUrl,
+  projectId
+}: PullRequestRowProps): JSX.Element {
   const author = pr.createdBy
   const status = derivedStatus(pr)
   const statusColor = pillColorForStatus(status)
@@ -423,6 +438,17 @@ function PullRequestRow({ pr, onOpen, disabled }: PullRequestRowProps): JSX.Elem
         borderColor: 'divider',
         cursor: disabled ? 'default' : 'pointer',
         transition: 'background-color 120ms',
+        // Hover-reveal pattern for quick-actions on the right edge
+        // of the row. We can't use `display: none` because the icon
+        // would lose its tooltip ref on first render; opacity flip
+        // keeps it accessible (focus-visible bumps it back to 1 too,
+        // so keyboard users can still tab to it).
+        '& .pr-row-actions': {
+          opacity: 0,
+          transition: 'opacity 120ms'
+        },
+        '&:hover .pr-row-actions': { opacity: 1 },
+        '&:focus-within .pr-row-actions': { opacity: 1 },
         '&:hover': disabled ? undefined : { bgcolor: 'action.hover' },
         '&:focus-visible': {
           outline: '2px solid',
@@ -492,12 +518,27 @@ function PullRequestRow({ pr, onOpen, disabled }: PullRequestRowProps): JSX.Elem
               <Typography
                 variant="caption"
                 color="text.secondary"
-                sx={{ fontSize: 11, ml: 'auto' }}
+                sx={{
+                  fontSize: 11,
+                  // Push the timestamp + quick-actions to the right
+                  // edge of the metadata strip. When `created` is
+                  // absent the quick-actions still get there via
+                  // their own `ml: 'auto'`.
+                  ml: 'auto'
+                }}
               >
                 {formatRelative(created)}
               </Typography>
             </Tooltip>
           )}
+          <RowQuickActions
+            pr={pr}
+            orgUrl={orgUrl}
+            projectId={projectId}
+            // When there's no timestamp to anchor the right edge,
+            // the actions take that role themselves.
+            anchorRight={!created}
+          />
         </Stack>
         <Typography
           variant="body2"
@@ -564,6 +605,96 @@ function PullRequestRow({ pr, onOpen, disabled }: PullRequestRowProps): JSX.Elem
           {reviewers.length > 0 && <ReviewerSummary reviewers={reviewers} />}
         </Stack>
       </Stack>
+    </Box>
+  )
+}
+
+/**
+ * Cluster of hover-revealed quick-actions on the right edge of each
+ * PR row's metadata strip. Only the WhatsApp share button lives here
+ * for v0.3.1; the wrapper exists so future quick-actions
+ * (copy-link, mark-as-read, etc.) can land in the same spot without
+ * adding more conditional branches inside `PullRequestRow`.
+ *
+ * Fades in via the `.pr-row-actions` opacity transition defined on
+ * the row's outer Box, so it's only visible on hover / focus-within
+ * — keyboard users keep access via the normal tab order, and mouse
+ * users see a clean row by default.
+ */
+interface RowQuickActionsProps {
+  pr: AdoPullRequest
+  orgUrl?: string
+  projectId: string
+  /**
+   * When the PR row has no `creationDate` to take the
+   * `ml: 'auto'` slot, the actions take that role themselves so
+   * they still sit flush right.
+   */
+  anchorRight?: boolean
+}
+
+function RowQuickActions({
+  pr,
+  orgUrl,
+  projectId,
+  anchorRight
+}: RowQuickActionsProps): JSX.Element {
+  const [shareOpen, setShareOpen] = useState(false)
+
+  const azureDevOpsUrl = useMemo(() => {
+    if (!orgUrl) return undefined
+    const projectName = pr.repository?.project?.name
+    const repoName = pr.repository?.name
+    if (!projectName || !repoName) return undefined
+    return `${orgUrl.replace(/\/+$/, '')}/${encodeURIComponent(projectName)}/_git/${encodeURIComponent(repoName)}/pullrequest/${pr.pullRequestId}`
+  }, [orgUrl, pr.repository?.project?.name, pr.repository?.name, pr.pullRequestId])
+
+  return (
+    <Box
+      className="pr-row-actions"
+      sx={{
+        ml: anchorRight ? 'auto' : 0.5,
+        display: 'inline-flex',
+        alignItems: 'center'
+      }}
+      onClick={(e) => {
+        // The row itself is a clickable region — stop the click on
+        // the action cluster from bubbling up so opening the share
+        // dialog doesn't simultaneously open the PR in ADO.
+        e.stopPropagation()
+      }}
+    >
+      <Tooltip title="Share via WhatsApp">
+        <span>
+          <IconButton
+            size="small"
+            aria-label={`Share PR #${pr.pullRequestId} via WhatsApp`}
+            onClick={(e) => {
+              e.stopPropagation()
+              setShareOpen(true)
+            }}
+            sx={{
+              padding: 0.25,
+              color: '#25D366',
+              '&:hover': { bgcolor: 'rgba(37, 211, 102, 0.12)' }
+            }}
+          >
+            <WhatsAppIcon sx={{ fontSize: 16 }} />
+          </IconButton>
+        </span>
+      </Tooltip>
+      {/* Mounted only while open so the lazy details query is dropped
+          on close (RTK Query unsubscribes when the hook unmounts).
+          This also resets the dialog's internal state every time. */}
+      {shareOpen && (
+        <WhatsAppShareDialog
+          open={shareOpen}
+          onClose={() => setShareOpen(false)}
+          pr={pr}
+          azureDevOpsUrl={azureDevOpsUrl}
+          projectId={projectId}
+        />
+      )}
     </Box>
   )
 }
