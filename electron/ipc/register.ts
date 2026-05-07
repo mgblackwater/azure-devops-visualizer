@@ -41,7 +41,11 @@ import {
   searchWiki,
   updatePage as updateWikiPage
 } from '../ado/wiki'
-import { listPullRequests, listRepositories } from '../ado/pullRequests'
+import {
+  getPullRequestChangesSummary,
+  listPullRequests,
+  listRepositories
+} from '../ado/pullRequests'
 import { read as readPreferences, writeSlice as writePreferencesSlice } from '../persistence/preferencesStore'
 
 type Handler = (...args: unknown[]) => Promise<unknown> | unknown
@@ -273,7 +277,19 @@ export function registerIpcHandlers(ipcMain: IpcMain): void {
         }
         await shell.openExternal(url)
         return { ok: true as const }
-      })
+      }),
+
+    /* ---------- v0.3.1 additions (WhatsApp share on PR rows) ---------- */
+    // Appended at the bottom of the handlers map so the parallel
+    // tray-notifications branch can register `NotificationOpenTarget`
+    // here without three-way merge pain. Keep new v0.3.1 handlers in
+    // this delimited block until the merge settles.
+    [IPC.GitPullRequestChanges]: (_e, args) =>
+      wrap(() =>
+        getPullRequestChangesSummary(
+          args as Parameters<typeof getPullRequestChangesSummary>[0]
+        )
+      )
   }
 
   for (const [channel, handler] of Object.entries(handlers)) {
