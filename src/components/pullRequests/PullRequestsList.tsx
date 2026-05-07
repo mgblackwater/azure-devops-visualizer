@@ -27,6 +27,7 @@ import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined'
 import WhatsAppIcon from '@mui/icons-material/WhatsApp'
 import { IPC } from '@shared/contract'
 import WhatsAppShareDialog from './WhatsAppShareDialog'
+import FilesSummaryChip from './FilesSummaryChip'
 import type {
   AdoGitRepository,
   AdoPullRequest,
@@ -513,6 +514,12 @@ function PullRequestRow({
               '& .MuiChip-icon': { color: 'inherit', ml: 0.5, mr: -0.25 }
             }}
           />
+          {/* Inline files-changed metadata chip — lazy-on-hover. Sits
+              between the status pill and the actions cluster as
+              factual PR metadata, not a quick-action, so it's
+              visible at all times rather than hover-revealed like
+              the WhatsApp icon. */}
+          <FilesSummaryChip pr={pr} />
           {created && (
             <Tooltip title={`Created ${created.toLocaleString()}`}>
               <Typography
