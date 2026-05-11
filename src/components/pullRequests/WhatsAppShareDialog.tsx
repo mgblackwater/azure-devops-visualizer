@@ -16,6 +16,9 @@ import {
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import WhatsAppIcon from '@mui/icons-material/WhatsApp'
+import ContentCopyIcon from '@mui/icons-material/ContentCopy'
+import CheckIcon from '@mui/icons-material/Check'
+import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline'
 import { IPC } from '@shared/contract'
 import type {
   AdoPullRequest,
@@ -100,6 +103,11 @@ export default function WhatsAppShareDialog({
   // when the details switch flips — appending instead so we don't
   // trash a hand-crafted note.
   const [userEdited, setUserEdited] = useState(false)
+  // Transient state for the Copy button so we can flip its label /
+  // colour to confirm the clipboard write without stealing focus
+  // from the textarea (a Snackbar would steal focus on screen
+  // readers and feels overweight for an inline action).
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
 
   const repositoryId = pr.repository?.id
 
@@ -112,7 +120,17 @@ export default function WhatsAppShareDialog({
     setBody(buildMinimalMessage(pr, azureDevOpsUrl))
     setShowDetails(false)
     setUserEdited(false)
+    setCopyState('idle')
   }, [open, pr, azureDevOpsUrl])
+
+  // Auto-revert the Copy button label back to "Copy text" 2.2s after
+  // each click so a follow-up copy lands on a fresh "Copy text" affordance
+  // instead of a stale "Copied!" badge.
+  useEffect(() => {
+    if (copyState === 'idle') return
+    const t = window.setTimeout(() => setCopyState('idle'), 2200)
+    return () => window.clearTimeout(t)
+  }, [copyState])
 
   const canFetchDetails = !!projectId && !!repositoryId
 
@@ -182,6 +200,25 @@ export default function WhatsAppShareDialog({
     onClose()
   }
 
+  /**
+   * Copy the (trimmed) message to the clipboard without closing the
+   * dialog — the user might want to copy *and then* still open
+   * WhatsApp, or paste into Slack/Teams/email instead. Inline state
+   * flip on the button confirms success so we don't need a Snackbar
+   * fighting the dialog for screen real estate.
+   */
+  async function handleCopyText(): Promise<void> {
+    const trimmed = body.trim()
+    if (!trimmed) return
+    try {
+      await navigator.clipboard.writeText(trimmed)
+      setCopyState('copied')
+    } catch (err) {
+      console.error('WhatsApp share copy failed', err)
+      setCopyState('failed')
+    }
+  }
+
   const charCount = body.length
   const isLong = charCount > SOFT_LIMIT
 
@@ -244,6 +281,18 @@ export default function WhatsAppShareDialog({
               if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
                 e.preventDefault()
                 handleOpenWhatsApp()
+                return
+              }
+              // Cmd/Ctrl+Shift+C copies the composed body without leaving
+              // the dialog — distinct from the browser's default Cmd+C
+              // (which still copies any text selection inside the field).
+              if (
+                (e.metaKey || e.ctrlKey) &&
+                e.shiftKey &&
+                (e.key === 'c' || e.key === 'C')
+              ) {
+                e.preventDefault()
+                void handleCopyText()
               }
             }}
             multiline
@@ -304,6 +353,45 @@ export default function WhatsAppShareDialog({
         <Button onClick={onClose} color="inherit">
           Cancel
         </Button>
+        <Tooltip
+          title={
+            copyState === 'copied'
+              ? ''
+              : copyState === 'failed'
+                ? 'Clipboard write was rejected'
+                : 'Copy the message text to clipboard (Ctrl+Shift+C)'
+          }
+        >
+          <span>
+            <Button
+              onClick={() => void handleCopyText()}
+              variant="outlined"
+              color={
+                copyState === 'failed'
+                  ? 'error'
+                  : copyState === 'copied'
+                    ? 'success'
+                    : 'inherit'
+              }
+              startIcon={
+                copyState === 'copied' ? (
+                  <CheckIcon />
+                ) : copyState === 'failed' ? (
+                  <ErrorOutlineIcon />
+                ) : (
+                  <ContentCopyIcon />
+                )
+              }
+              disabled={body.trim().length === 0}
+            >
+              {copyState === 'copied'
+                ? 'Copied!'
+                : copyState === 'failed'
+                  ? 'Copy failed'
+                  : 'Copy text'}
+            </Button>
+          </span>
+        </Tooltip>
         <Button
           onClick={handleOpenWhatsApp}
           variant="contained"

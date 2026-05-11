@@ -43,7 +43,6 @@ import {
   getState,
   getTags,
   getTargetDate,
-  getTeamProject,
   getTitle,
   getType,
   relationTargetId
@@ -55,7 +54,9 @@ import RichDescription from './RichDescription'
 import CommentComposer from './comment/CommentComposer'
 import StateChangerPopover from './StateChangerPopover'
 import TagEditorDialog from './TagEditorDialog'
+import WorkItemIdCopy from './WorkItemIdCopy'
 import FavoriteButton from '@/components/common/FavoriteButton'
+import { buildWorkItemUrl } from '@/utils/workItemLinks'
 import type {
   AdoComment,
   AdoRelation,
@@ -409,17 +410,7 @@ export default function WorkItemDrawer(): JSX.Element {
     { skip: !open || !projectId }
   )
 
-  const webUrl = useMemo(() => {
-    if (!item || !orgUrl) return null
-    const base = orgUrl.replace(/\/+$/, '')
-    // Prefer the work item's own TeamProject — the workspace selection may
-    // differ (especially when opening cross-project items via search). If
-    // we don't know the project, fall back to the org-level path; ADO
-    // redirects /{org}/_workitems/edit/{id} to the correct project.
-    const ownProject = getTeamProject(item)
-    const project = ownProject ? `/${encodeURIComponent(ownProject)}` : ''
-    return `${base}${project}/_workitems/edit/${item.id}`
-  }, [item, orgUrl])
+  const webUrl = useMemo(() => buildWorkItemUrl(item, orgUrl), [item, orgUrl])
 
   async function openInBrowser(): Promise<void> {
     if (!webUrl) return
@@ -550,9 +541,19 @@ export default function WorkItemDrawer(): JSX.Element {
                 }}
               />
             )}
-            <Typography variant="overline" color="text.secondary">
-              #{selectedWorkItemId}
-            </Typography>
+            {selectedWorkItemId != null && (
+              <WorkItemIdCopy
+                id={selectedWorkItemId}
+                title={item ? getTitle(item) : undefined}
+                type={item ? getType(item) : undefined}
+                state={item ? getState(item) : undefined}
+                webUrl={webUrl}
+                variant="overline"
+                item={item ?? undefined}
+                orgUrl={orgUrl || undefined}
+                comments={commentsQ.data?.comments}
+              />
+            )}
           </Stack>
           <Typography
             variant="h6"

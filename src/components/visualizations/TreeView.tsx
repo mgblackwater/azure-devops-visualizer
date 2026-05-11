@@ -23,6 +23,7 @@ import TypeFilter from './TypeFilter'
 import {
   getAssigneeName,
   getState,
+  getTags,
   getTitle,
   getType,
   relationTargetId,
@@ -32,6 +33,9 @@ import {
 } from '@/utils/workItemFields'
 import { colorForState, colorForType, readableTextColor } from '@/utils/adoColors'
 import EmptyState from './EmptyState'
+import WorkItemIdCopy from '@/components/workItem/WorkItemIdCopy'
+import { buildWorkItemUrl } from '@/utils/workItemLinks'
+import { useGetConnectionQuery } from '@/store/api/adoApi'
 import type { AdoWorkItem } from '@shared/adoTypes'
 
 const HIERARCHY_FORWARD = 'System.LinkTypes.Hierarchy-Forward'
@@ -103,6 +107,11 @@ export default function TreeView(): JSX.Element {
   const filtered = useMemo(() => applyTypeFilter(raw, hiddenTypes), [raw, hiddenTypes])
   const { items, links, isLoading, isFetching, error } = filtered
   const dispatch = useAppDispatch()
+  // Org URL is needed to build the per-item ADO web URL the copy menu
+  // can include in its "full context" format. We don't gate the row on
+  // it — copy still works without the URL, just without the URL line.
+  const connectionQ = useGetConnectionQuery()
+  const orgUrl = connectionQ.data?.organizationUrl ?? ''
 
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set())
   const [sortMode, setSortMode] = useState<SiblingSortMode>('stackRank')
@@ -197,7 +206,8 @@ export default function TreeView(): JSX.Element {
       const t = getTitle(w).toLowerCase()
       const ty = getType(w).toLowerCase()
       const a = getAssigneeName(w).toLowerCase()
-      return t.includes(term) || ty.includes(term) || a.includes(term)
+      const tags = getTags(w).join(' ').toLowerCase()
+      return t.includes(term) || ty.includes(term) || a.includes(term) || tags.includes(term)
     }
 
     // Build the "matched ancestors" set: any matching item plus every
@@ -305,7 +315,7 @@ export default function TreeView(): JSX.Element {
         </FormControl>
         <TextField
           size="small"
-          placeholder="Filter by id / title / owner…"
+          placeholder="Filter by id / title / owner / tag…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           sx={{ minWidth: 240, flex: '1 1 240px', maxWidth: 360 }}
@@ -337,6 +347,7 @@ export default function TreeView(): JSX.Element {
                   row={row}
                   item={w}
                   focused={focused}
+                  orgUrl={orgUrl}
                   onToggle={() => toggleCollapse(row.id)}
                   onOpen={() => dispatch(selectWorkItem(row.id))}
                 />
@@ -353,12 +364,14 @@ function TreeRowView({
   row,
   item,
   focused,
+  orgUrl,
   onToggle,
   onOpen
 }: {
   row: TreeRow
   item: AdoWorkItem
   focused: boolean
+  orgUrl: string
   onToggle: () => void
   onOpen: () => void
 }): JSX.Element {
@@ -366,8 +379,16 @@ function TreeRowView({
   const state = getState(item)
   const type = getType(item)
   const owner = getAssigneeName(item)
+  const tags = getTags(item)
   const typeColor = colorForType(type)
   const stateColor = colorForState(state)
+  const webUrl = buildWorkItemUrl(item, orgUrl)
+  // Cap visible tag chips per row so a Feature with 8+ tags doesn't push
+  // the avatar / state column off-screen. The "+N" overflow chip carries
+  // a tooltip with the full list.
+  const MAX_VISIBLE_TAGS = 3
+  const visibleTags = tags.slice(0, MAX_VISIBLE_TAGS)
+  const hiddenTagCount = tags.length - visibleTags.length
   // Indent step large enough that the relationship reads at a glance, but
   // not so large that 5+ levels run off the right edge of the viewport.
   const INDENT_PX = 22
@@ -438,13 +459,17 @@ function TreeRowView({
           }
         }}
       />
-      <Typography
-        variant="caption"
-        color="text.secondary"
-        sx={{ fontVariantNumeric: 'tabular-nums', flexShrink: 0, fontSize: 11 }}
-      >
-        #{item.id}
-      </Typography>
+      <Box sx={{ flexShrink: 0 }}>
+        <WorkItemIdCopy
+          id={item.id}
+          title={title}
+          type={type}
+          state={state}
+          webUrl={webUrl}
+          variant="caption"
+          fontSize={11}
+        />
+      </Box>
       <Typography
         variant="body2"
         sx={{
@@ -459,6 +484,56 @@ function TreeRowView({
       >
         {title}
       </Typography>
+      {tags.length > 0 && (
+        <Stack
+          direction="row"
+          spacing={0.5}
+          alignItems="center"
+          sx={{ flexShrink: 0 }}
+        >
+          {visibleTags.map((tag) => (
+            <Tooltip key={tag} title={tag}>
+              <Chip
+                size="small"
+                label={tag}
+                variant="outlined"
+                sx={{
+                  height: 18,
+                  maxWidth: 140,
+                  borderColor: 'divider',
+                  color: 'text.secondary',
+                  '& .MuiChip-label': {
+                    px: 0.75,
+                    fontSize: 10,
+                    letterSpacing: 0.2,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis'
+                  }
+                }}
+              />
+            </Tooltip>
+          ))}
+          {hiddenTagCount > 0 && (
+            <Tooltip title={tags.join(' · ')}>
+              <Chip
+                size="small"
+                label={`+${hiddenTagCount}`}
+                variant="outlined"
+                sx={{
+                  height: 18,
+                  borderColor: 'divider',
+                  color: 'text.secondary',
+                  '& .MuiChip-label': {
+                    px: 0.75,
+                    fontSize: 10,
+                    fontWeight: 600
+                  }
+                }}
+              />
+            </Tooltip>
+          )}
+        </Stack>
+      )}
       <Tooltip title={owner}>
         <Box
           sx={{
