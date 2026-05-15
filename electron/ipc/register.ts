@@ -1,5 +1,7 @@
-import type { BrowserWindow, IpcMain } from 'electron'
+import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from 'electron'
 import { app, shell } from 'electron'
+import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { IPC, IPC_ERROR_PREFIX, type IpcChannel } from '@shared/contract'
 import type { AdoConnectionInfo, IpcError } from '@shared/adoTypes'
@@ -65,7 +67,11 @@ import { checkClaudeCliAvailable, runClaude } from '../claude/claudeRunner'
 import { readSession, transcriptForLLM } from '../claude/sessionReader'
 import { aggregateStats } from '../claude/statsAggregator'
 import { buildJournalPayload } from '../claude/adoCorrelator'
-import { openSessionInTerminal } from '../claude/terminalLauncher'
+import {
+  openSessionInTerminal,
+  startSessionInTerminal
+} from '../claude/terminalLauncher'
+import { dialog, BrowserWindow as ElectronBrowserWindow } from 'electron'
 import type { AdoItemRef } from '@shared/claudeTypes'
 
 function claudePromptPath(name: string): string {
@@ -479,6 +485,74 @@ ${payload}
         })
         if (!result.ok) throw new Error(result.error)
         return result
+      }),
+
+    [IPC.ClaudeStartInTerminal]: (_e, args) =>
+      wrap(() => {
+        const { cwd, prompt, shell } = args as {
+          cwd: string
+          prompt: string
+          shell: import('@shared/claudeTypes').TerminalShell
+        }
+
+        // Prompts built from ADO work items can run into the tens of KB
+        // once description HTML + comments + ADO-image data URIs land in
+        // them. Passing that as a CLI arg blows Windows' command-line
+        // limit (`spawn ENAMETOOLONG`). Spill the full payload to a temp
+        // file and hand Claude a SHORT pointer prompt that asks it to
+        // read the file. Threshold of 4KB is comfortably below every
+        // shell's quoted-arg limit while keeping small prompts inline.
+        let effectivePrompt = prompt
+        if (Buffer.byteLength(prompt, 'utf8') > 4096) {
+          const dir = path.join(os.tmpdir(), 'azdo-claude-prompts')
+          try {
+            fs.mkdirSync(dir, { recursive: true })
+          } catch {
+            // ignore — the writeFileSync below will surface a real error
+          }
+          const fileName = `ado-context-${Date.now()}.md`
+          const filePath = path.join(dir, fileName)
+          fs.writeFileSync(filePath, prompt, 'utf8')
+          // Single line on purpose — multi-line `-Command` values get
+          // truncated by cmd.exe's line-terminator handling on the way to
+          // PowerShell.
+          effectivePrompt = `I'm starting work on an Azure DevOps item. The full brief (title, description, metadata, comments, inline image data) is saved at ${filePath} — please read that file first, give me a one-paragraph summary plus a short implementation plan, then proceed.`
+        }
+
+        const result = startSessionInTerminal({
+          cwd,
+          prompt: effectivePrompt,
+          shell
+        })
+        if (!result.ok) throw new Error(result.error)
+        return result
+      }),
+
+    [IPC.ClaudePickDirectory]: (event, args) =>
+      wrap(async () => {
+        const { defaultPath, title } = (args ?? {}) as {
+          defaultPath?: string
+          title?: string
+        }
+        const ev = event as IpcMainInvokeEvent
+        const browserWindow = ElectronBrowserWindow.fromWebContents(
+          ev.sender
+        )
+        const result = browserWindow
+          ? await dialog.showOpenDialog(browserWindow, {
+              properties: ['openDirectory'],
+              defaultPath,
+              title: title ?? 'Select a folder'
+            })
+          : await dialog.showOpenDialog({
+              properties: ['openDirectory'],
+              defaultPath,
+              title: title ?? 'Select a folder'
+            })
+        if (result.canceled || result.filePaths.length === 0) {
+          return { path: null }
+        }
+        return { path: result.filePaths[0] }
       })
   }
 

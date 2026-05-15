@@ -91,3 +91,15 @@ export type OpenInTerminalArgs = { sessionId: string; shell: TerminalShell }
 export type OpenInTerminalResult =
   | { ok: true }
   | { ok: false; error: string }
+
+export type StartInTerminalArgs = {
+  cwd: string
+  prompt: string
+  shell: TerminalShell
+}
+export type StartInTerminalResult =
+  | { ok: true }
+  | { ok: false; error: string }
+
+export type PickDirectoryArgs = { defaultPath?: string; title?: string }
+export type PickDirectoryResult = { path: string | null }

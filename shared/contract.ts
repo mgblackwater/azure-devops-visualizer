@@ -35,9 +35,13 @@ import type {
   ListSessionsArgs,
   OpenInTerminalArgs,
   OpenInTerminalResult,
+  PickDirectoryArgs,
+  PickDirectoryResult,
   RescanIndexResult,
   SessionDetail,
   SessionMeta,
+  StartInTerminalArgs,
+  StartInTerminalResult,
   StatsBucket,
   SummarizeSessionArgs,
   SummarizeSessionResult
@@ -237,7 +241,9 @@ export const IPC = {
   ClaudeGenerateJournal: 'claude.generateJournal',
   ClaudeRescanIndex: 'claude.rescanIndex',
   ClaudeCliAvailable: 'claude.cliAvailable',
-  ClaudeOpenInTerminal: 'claude.openInTerminal'
+  ClaudeOpenInTerminal: 'claude.openInTerminal',
+  ClaudeStartInTerminal: 'claude.startInTerminal',
+  ClaudePickDirectory: 'claude.pickDirectory'
 } as const
 
 /**
@@ -685,6 +691,14 @@ export interface IpcSignatures {
   [IPC.ClaudeOpenInTerminal]: {
     args: OpenInTerminalArgs
     result: OpenInTerminalResult
+  }
+  [IPC.ClaudeStartInTerminal]: {
+    args: StartInTerminalArgs
+    result: StartInTerminalResult
+  }
+  [IPC.ClaudePickDirectory]: {
+    args: PickDirectoryArgs
+    result: PickDirectoryResult
   }
 }
 

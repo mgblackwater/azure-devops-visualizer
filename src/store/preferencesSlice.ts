@@ -47,6 +47,13 @@ export interface PreferencesState {
   workspaceByOrg: Record<string, WorkspaceSnapshot>
   themeMode: ThemeMode
   sidebarCollapsed: boolean
+  /**
+   * Per-ADO-project repository folder that "Start with Claude" uses as
+   * the cwd for the spawned terminal. Keyed by ADO project id. Stored
+   * here (not under workspaceByOrg) so a user with multiple projects in
+   * one org can map each to its own local repo.
+   */
+  claudeRepoByProject: Record<string, string>
 }
 
 /**
@@ -62,7 +69,8 @@ function emptyState(): PreferencesState {
     defaultProjectByOrg: {},
     workspaceByOrg: {},
     themeMode: 'system',
-    sidebarCollapsed: false
+    sidebarCollapsed: false,
+    claudeRepoByProject: {}
   }
 }
 
@@ -94,6 +102,13 @@ function sanitizeState(parsed: unknown): PreferencesState {
   }
   out.themeMode = sanitizeThemeMode(p.themeMode)
   out.sidebarCollapsed = typeof p.sidebarCollapsed === 'boolean' ? p.sidebarCollapsed : false
+  if (p.claudeRepoByProject && typeof p.claudeRepoByProject === 'object') {
+    for (const [k, v] of Object.entries(p.claudeRepoByProject)) {
+      if (typeof k === 'string' && typeof v === 'string') {
+        out.claudeRepoByProject[k] = v
+      }
+    }
+  }
   return out
 }
 
@@ -210,6 +225,15 @@ const slice = createSlice({
     toggleSidebarCollapsed(state) {
       state.sidebarCollapsed = !state.sidebarCollapsed
       persist(state)
+    },
+    setClaudeRepoPath(
+      state,
+      action: PayloadAction<{ projectId: string; path: string }>
+    ) {
+      const { projectId, path } = action.payload
+      if (!projectId || !path) return
+      state.claudeRepoByProject[projectId] = path
+      persist(state)
     }
   }
 })
@@ -246,6 +270,14 @@ export function selectSidebarCollapsed(state: {
   return state.preferences.sidebarCollapsed
 }
 
+export function selectClaudeRepoPath(
+  state: { preferences: PreferencesState },
+  projectId: string | null | undefined
+): string | null {
+  if (!projectId) return null
+  return state.preferences.claudeRepoByProject[projectId] ?? null
+}
+
 export const EMPTY_WORKSPACE_SNAPSHOT = EMPTY_SNAPSHOT
 
 export const {
@@ -255,7 +287,8 @@ export const {
   clearWorkspaceSnapshot,
   setThemeMode,
   setSidebarCollapsed,
-  toggleSidebarCollapsed
+  toggleSidebarCollapsed,
+  setClaudeRepoPath
 } = slice.actions
 
 export default slice.reducer

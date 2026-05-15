@@ -10,17 +10,59 @@ function escapeAppleScriptString(s: string): string {
   return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 }
 
+/**
+ * Build the inner claude command line. When `prompt` is provided we start
+ * a fresh interactive session pre-seeded with that prompt; otherwise we
+ * resume an existing session by id. The prompt is single-quoted for
+ * PowerShell consumption (embedded single-quotes get doubled, PS escape
+ * rules) so multi-line content with quotes survives the shell hop.
+ */
+function buildClaudeCommandPs(opts: {
+  sessionId?: string
+  prompt?: string
+}): string {
+  if (opts.prompt !== undefined) {
+    const escaped = opts.prompt.replace(/'/g, "''")
+    return `claude '${escaped}'`
+  }
+  return `claude --resume ${opts.sessionId}`
+}
+
+/**
+ * PowerShell `-EncodedCommand` expects a base64 UTF-16LE string. Using
+ * this instead of `-Command "..."` sidesteps cmd.exe's line-terminator
+ * and quote-handling quirks entirely, so multi-line prompts and embedded
+ * quotes survive the `cmd /c start` hop without escaping issues.
+ */
+function encodePowerShell(command: string): string {
+  return Buffer.from(command, 'utf16le').toString('base64')
+}
+
+/** POSIX (bash / zsh) single-quote escape: close quote, escape, reopen. */
+function buildClaudeCommandPosix(opts: {
+  sessionId?: string
+  prompt?: string
+}): string {
+  if (opts.prompt !== undefined) {
+    const escaped = opts.prompt.replace(/'/g, `'\\''`)
+    return `claude '${escaped}'`
+  }
+  return `claude --resume ${opts.sessionId}`
+}
+
 function launchWindows(
-  sessionId: string,
+  sessionId: string | undefined,
   cwd: string,
-  shell: TerminalShell
+  shell: TerminalShell,
+  prompt?: string
 ): OpenInTerminalResult {
   if (shell === 'wt') {
     // Windows Terminal — bundled on Win11, available via Microsoft Store
     // on Win10. Routed through `cmd /c start` because `wt.exe` lives under
     // WindowsApps (Store-installed) and isn't always on PATH for GUI-app
     // children.
-    const psCommand = `claude --resume ${sessionId}`
+    const psCommand = buildClaudeCommandPs({ sessionId, prompt })
+    const encoded = encodePowerShell(psCommand)
     const child = spawn(
       'cmd.exe',
       [
@@ -32,8 +74,8 @@ function launchWindows(
         cwd,
         'powershell.exe',
         '-NoExit',
-        '-Command',
-        psCommand
+        '-EncodedCommand',
+        encoded
       ],
       { detached: true, stdio: 'ignore', shell: false }
     )
@@ -42,9 +84,12 @@ function launchWindows(
   }
 
   if (shell === 'powershell') {
-    // `cmd /c start "" /D <cwd> powershell -NoExit -Command ...` opens a
-    // fresh console window with PowerShell rooted in the session's cwd.
-    const psCommand = `claude --resume ${sessionId}`
+    // `cmd /c start "" /D <cwd> powershell -NoExit -EncodedCommand ...`
+    // opens a fresh console window with PowerShell rooted in the session's
+    // cwd. We pass the command base64-encoded so cmd never has to parse
+    // the inner quotes / newlines.
+    const psCommand = buildClaudeCommandPs({ sessionId, prompt })
+    const encoded = encodePowerShell(psCommand)
     const child = spawn(
       'cmd.exe',
       [
@@ -55,8 +100,8 @@ function launchWindows(
         cwd,
         'powershell.exe',
         '-NoExit',
-        '-Command',
-        psCommand
+        '-EncodedCommand',
+        encoded
       ],
       { detached: true, stdio: 'ignore', shell: false }
     )
@@ -68,12 +113,14 @@ function launchWindows(
 }
 
 function launchMacOS(
-  sessionId: string,
+  sessionId: string | undefined,
   cwd: string,
-  shell: TerminalShell
+  shell: TerminalShell,
+  prompt?: string
 ): OpenInTerminalResult {
   // Single command run inside whichever terminal app we pick.
-  const command = `cd ${JSON.stringify(cwd)} && claude --resume ${sessionId}`
+  const claudePart = buildClaudeCommandPosix({ sessionId, prompt })
+  const command = `cd ${JSON.stringify(cwd)} && ${claudePart}`
 
   if (shell === 'macos-terminal') {
     // Open a new Terminal.app window running the command.
@@ -131,6 +178,36 @@ export function openSessionInTerminal(args: {
     }
     if (process.platform === 'darwin') {
       return launchMacOS(args.sessionId, args.cwd, args.shell)
+    }
+    return {
+      ok: false,
+      error: `Terminal launcher is not supported on ${process.platform} yet.`
+    }
+  } catch (err) {
+    return { ok: false, error: (err as Error).message }
+  }
+}
+
+/**
+ * Start a fresh interactive Claude session pre-seeded with `prompt`.
+ * Mirrors `openSessionInTerminal` but takes a prompt instead of a session
+ * id, so callers like the ADO work-item drawer can hand off context
+ * (title + description + comments) without first creating a session.
+ */
+export function startSessionInTerminal(args: {
+  cwd: string
+  prompt: string
+  shell: TerminalShell
+}): OpenInTerminalResult {
+  if (!args.cwd) return { ok: false, error: 'Missing cwd' }
+  if (!args.prompt) return { ok: false, error: 'Missing prompt' }
+
+  try {
+    if (process.platform === 'win32') {
+      return launchWindows(undefined, args.cwd, args.shell, args.prompt)
+    }
+    if (process.platform === 'darwin') {
+      return launchMacOS(undefined, args.cwd, args.shell, args.prompt)
     }
     return {
       ok: false,

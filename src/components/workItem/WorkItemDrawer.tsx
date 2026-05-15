@@ -19,6 +19,7 @@ import PersonOutlineIcon from '@mui/icons-material/PersonOutline'
 import OpenInFullIcon from '@mui/icons-material/OpenInFull'
 import CloseFullscreenIcon from '@mui/icons-material/CloseFullscreen'
 import AddIcon from '@mui/icons-material/Add'
+import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome'
 import { useNavigate } from 'react-router-dom'
 import {
   useBatchGetWorkItemsQuery,
@@ -52,6 +53,7 @@ import { relativeTime } from '@/utils/sanitize'
 import { normalizeMentionName, buildSubtreeWiql } from '@/utils/wiql'
 import RichDescription from './RichDescription'
 import CommentComposer from './comment/CommentComposer'
+import StartClaudeDialog from './StartClaudeDialog'
 import StateChangerPopover from './StateChangerPopover'
 import TagEditorDialog from './TagEditorDialog'
 import WorkItemIdCopy from './WorkItemIdCopy'
@@ -251,7 +253,7 @@ function RelationRow({
 type DrawerWidth = 'compact' | 'fullscreen'
 
 const DRAWER_WIDTH_PX: Record<DrawerWidth, string> = {
-  compact: '480px',
+  compact: '560px',
   fullscreen: '100vw'
 }
 
@@ -443,6 +445,7 @@ export default function WorkItemDrawer(): JSX.Element {
   const [stateAnchor, setStateAnchor] = useState<HTMLElement | null>(null)
   const [tagDialogOpen, setTagDialogOpen] = useState(false)
   const [stateError, setStateError] = useState<string | null>(null)
+  const [claudeDialogOpen, setClaudeDialogOpen] = useState(false)
   const [updateState, updateStateRes] = useUpdateWorkItemStateMutation()
   const [updateTags] = useUpdateWorkItemTagsMutation()
 
@@ -640,6 +643,14 @@ export default function WorkItemDrawer(): JSX.Element {
               Open in Azure DevOps
             </Button>
           )}
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<AutoAwesomeIcon />}
+            onClick={() => setClaudeDialogOpen(true)}
+          >
+            Start with Claude
+          </Button>
         </Stack>
       )}
 
@@ -901,6 +912,16 @@ export default function WorkItemDrawer(): JSX.Element {
             projectId={projectId}
             onSave={handleSaveTags}
           />
+          {item && (
+            <StartClaudeDialog
+              open={claudeDialogOpen}
+              onClose={() => setClaudeDialogOpen(false)}
+              item={item}
+              orgUrl={orgUrl}
+              projectId={projectId}
+              comments={commentsQ.data?.comments ?? []}
+            />
+          )}
         </>
       )}
     </Drawer>
