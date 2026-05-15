@@ -72,6 +72,7 @@ const bridge: AdoBridge = {
     }
     return () => {}
   },
+  platform: process.platform,
   preferences: {
     /**
      * Synchronous read of the disk-backed preferences blob.

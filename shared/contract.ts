@@ -33,6 +33,8 @@ import type {
   GetSessionArgs,
   GetStatsArgs,
   ListSessionsArgs,
+  OpenInTerminalArgs,
+  OpenInTerminalResult,
   RescanIndexResult,
   SessionDetail,
   SessionMeta,
@@ -234,7 +236,8 @@ export const IPC = {
   ClaudeSummarizeSession: 'claude.summarizeSession',
   ClaudeGenerateJournal: 'claude.generateJournal',
   ClaudeRescanIndex: 'claude.rescanIndex',
-  ClaudeCliAvailable: 'claude.cliAvailable'
+  ClaudeCliAvailable: 'claude.cliAvailable',
+  ClaudeOpenInTerminal: 'claude.openInTerminal'
 } as const
 
 /**
@@ -679,6 +682,10 @@ export interface IpcSignatures {
     args: Record<string, never>
     result: ClaudeCliAvailableResult
   }
+  [IPC.ClaudeOpenInTerminal]: {
+    args: OpenInTerminalArgs
+    result: OpenInTerminalResult
+  }
 }
 
 export type IpcArgs<C extends IpcChannel> = IpcSignatures[C]['args']
@@ -720,6 +727,25 @@ export interface AdoBridge {
   on(event: 'open-target', handler: (target: NotificationOpenTarget) => void): () => void
   /** Disk-backed preferences store; replaces localStorage for persisted state. */
   preferences: PreferencesBridge
+  /**
+   * Operating system reported by the Electron main process. Exposed so
+   * the renderer can show platform-appropriate options (e.g. PowerShell on
+   * Windows vs Terminal.app on macOS) without round-tripping an IPC.
+   * Type matches Node's `NodeJS.Platform` but inlined here so the renderer
+   * tsconfig doesn't need @types/node in scope.
+   */
+  platform:
+    | 'aix'
+    | 'android'
+    | 'darwin'
+    | 'freebsd'
+    | 'haiku'
+    | 'linux'
+    | 'openbsd'
+    | 'sunos'
+    | 'win32'
+    | 'cygwin'
+    | 'netbsd'
 }
 
 declare global {

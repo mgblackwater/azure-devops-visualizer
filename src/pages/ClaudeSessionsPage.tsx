@@ -4,6 +4,7 @@ import styled from '@emotion/styled'
 import {
   Button,
   Checkbox,
+  Divider,
   FormControlLabel,
   IconButton,
   Menu,
@@ -15,7 +16,7 @@ import { alpha } from '@mui/material/styles'
 import MoreVertIcon from '@mui/icons-material/MoreVert'
 import type { SessionMeta } from '@shared/claudeTypes'
 import { useAppDispatch, useAppSelector } from '../store'
-import { fetchSessions, rescanIndex } from '../store/claudeSlice'
+import { fetchSessions, openInTerminal, rescanIndex } from '../store/claudeSlice'
 import ClaudeSubNav from '../components/claude/ClaudeSubNav'
 
 const Container = styled.div`
@@ -401,6 +402,62 @@ export default function ClaudeSessionsPage(): JSX.Element {
       </ListWrapper>
 
       <Menu anchorEl={menu?.anchor} open={!!menu} onClose={() => setMenu(null)}>
+        {window.ado.platform === 'win32' && (
+          <MenuItem
+            onClick={() => {
+              if (!menu) return
+              void dispatch(
+                openInTerminal({ sessionId: menu.session.id, shell: 'wt' })
+              )
+              setMenu(null)
+            }}
+          >
+            Open in Windows Terminal
+          </MenuItem>
+        )}
+        {window.ado.platform === 'win32' && (
+          <MenuItem
+            onClick={() => {
+              if (!menu) return
+              void dispatch(
+                openInTerminal({ sessionId: menu.session.id, shell: 'powershell' })
+              )
+              setMenu(null)
+            }}
+          >
+            Open in PowerShell
+          </MenuItem>
+        )}
+        {window.ado.platform === 'darwin' && (
+          <MenuItem
+            onClick={() => {
+              if (!menu) return
+              void dispatch(
+                openInTerminal({
+                  sessionId: menu.session.id,
+                  shell: 'macos-terminal'
+                })
+              )
+              setMenu(null)
+            }}
+          >
+            Open in Terminal
+          </MenuItem>
+        )}
+        {window.ado.platform === 'darwin' && (
+          <MenuItem
+            onClick={() => {
+              if (!menu) return
+              void dispatch(
+                openInTerminal({ sessionId: menu.session.id, shell: 'iterm2' })
+              )
+              setMenu(null)
+            }}
+          >
+            Open in iTerm2
+          </MenuItem>
+        )}
+        <Divider />
         <MenuItem onClick={() => menu && copy(menu.session.id)}>
           Copy session ID
         </MenuItem>

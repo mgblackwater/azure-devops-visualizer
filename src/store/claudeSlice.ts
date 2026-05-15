@@ -97,6 +97,14 @@ export const generateJournal = createAsyncThunk(
   }) => window.ado.invoke(IPC.ClaudeGenerateJournal, args)
 )
 
+export const openInTerminal = createAsyncThunk(
+  'claude/openInTerminal',
+  async (args: {
+    sessionId: string
+    shell: import('@shared/claudeTypes').TerminalShell
+  }) => window.ado.invoke(IPC.ClaudeOpenInTerminal, args)
+)
+
 const slice = createSlice({
   name: 'claude',
   initialState,
@@ -209,6 +217,9 @@ const slice = createSlice({
         s.journalUi.isGenerating = false
         s.loading.journal = false
         s.error = a.error.message ?? 'Journal generation failed'
+      })
+      .addCase(openInTerminal.rejected, (s, a) => {
+        s.error = a.error.message ?? 'Failed to open terminal'
       })
   }
 })

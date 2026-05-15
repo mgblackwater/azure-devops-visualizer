@@ -65,6 +65,7 @@ import { checkClaudeCliAvailable, runClaude } from '../claude/claudeRunner'
 import { readSession, transcriptForLLM } from '../claude/sessionReader'
 import { aggregateStats } from '../claude/statsAggregator'
 import { buildJournalPayload } from '../claude/adoCorrelator'
+import { openSessionInTerminal } from '../claude/terminalLauncher'
 import type { AdoItemRef } from '@shared/claudeTypes'
 
 function claudePromptPath(name: string): string {
@@ -461,6 +462,23 @@ ${payload}
         if (!result.ok) throw new Error(result.error)
         writeJournal(date, result.markdown)
         return { markdown: result.markdown, cached: false }
+      }),
+
+    [IPC.ClaudeOpenInTerminal]: (_e, args) =>
+      wrap(() => {
+        const { sessionId, shell } = args as {
+          sessionId: string
+          shell: import('@shared/claudeTypes').TerminalShell
+        }
+        const meta = readIndex().find((m) => m.id === sessionId)
+        if (!meta) throw new Error(`Session not found: ${sessionId}`)
+        const result = openSessionInTerminal({
+          sessionId: meta.id,
+          cwd: meta.cwd,
+          shell
+        })
+        if (!result.ok) throw new Error(result.error)
+        return result
       })
   }
 

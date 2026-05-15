@@ -5,7 +5,11 @@ import { Button, Chip, ToggleButton, ToggleButtonGroup } from '@mui/material'
 import { alpha } from '@mui/material/styles'
 import ReactMarkdown from 'react-markdown'
 import { useAppDispatch, useAppSelector } from '../store'
-import { fetchSessionDetail, summarizeSession } from '../store/claudeSlice'
+import {
+  fetchSessionDetail,
+  openInTerminal,
+  summarizeSession
+} from '../store/claudeSlice'
 
 const Container = styled.div`
   padding: 24px;
@@ -313,20 +317,70 @@ export default function ClaudeSessionDetailPage(): JSX.Element {
           </SubMeta>
         </HeaderText>
         <HeaderActions>
+          {window.ado.platform === 'win32' && (
+            <>
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={() =>
+                  void dispatch(openInTerminal({ sessionId: m.id, shell: 'wt' }))
+                }
+              >
+                Resume in Windows Terminal
+              </Button>
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={() =>
+                  void dispatch(
+                    openInTerminal({ sessionId: m.id, shell: 'powershell' })
+                  )
+                }
+              >
+                Resume in PowerShell
+              </Button>
+            </>
+          )}
+          {window.ado.platform === 'darwin' && (
+            <>
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={() =>
+                  void dispatch(
+                    openInTerminal({ sessionId: m.id, shell: 'macos-terminal' })
+                  )
+                }
+              >
+                Resume in Terminal
+              </Button>
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={() =>
+                  void dispatch(
+                    openInTerminal({ sessionId: m.id, shell: 'iterm2' })
+                  )
+                }
+              >
+                Resume in iTerm2
+              </Button>
+            </>
+          )}
           <Button
             size="small"
-            variant="outlined"
+            variant="text"
             onClick={() => navigator.clipboard.writeText(resumeCmd)}
             title={resumeCmd}
           >
-            Copy resume command
+            Copy command
           </Button>
           <Button
             size="small"
             variant="text"
             onClick={() => navigator.clipboard.writeText(m.id)}
           >
-            Copy session ID
+            Copy ID
           </Button>
         </HeaderActions>
       </Header>

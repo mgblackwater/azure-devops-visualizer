@@ -81,3 +81,13 @@ export type SummarizeSessionResult = { markdown: string; cached: boolean }
 export type GenerateJournalResult = { markdown: string; cached: boolean }
 export type RescanIndexResult = { count: number; durationMs: number }
 export type ClaudeCliAvailableResult = { available: boolean; version?: string }
+
+export type TerminalShell =
+  | 'wt'
+  | 'powershell'
+  | 'macos-terminal'
+  | 'iterm2'
+export type OpenInTerminalArgs = { sessionId: string; shell: TerminalShell }
+export type OpenInTerminalResult =
+  | { ok: true }
+  | { ok: false; error: string }
