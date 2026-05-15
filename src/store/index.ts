@@ -6,6 +6,7 @@ import workspaceReducer from './workspaceSlice'
 import recentSearchesReducer from './recentSearchesSlice'
 import preferencesReducer from './preferencesSlice'
 import favoritesReducer from './favoritesSlice'
+import claudeReducer from './claudeSlice'
 
 export const store = configureStore({
   reducer: {
@@ -13,7 +14,8 @@ export const store = configureStore({
     workspace: workspaceReducer,
     recentSearches: recentSearchesReducer,
     preferences: preferencesReducer,
-    favorites: favoritesReducer
+    favorites: favoritesReducer,
+    claude: claudeReducer
   },
   middleware: (getDefault) => getDefault().concat(adoApi.middleware)
 })

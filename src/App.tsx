@@ -12,6 +12,11 @@ import HomePage from './pages/HomePage'
 import VisualizePage from './pages/VisualizePage'
 import SprintPage from './pages/SprintPage'
 import WikiPage from './pages/WikiPage'
+import ClaudeSessionsPage from './pages/ClaudeSessionsPage'
+import ClaudeSessionDetailPage from './pages/ClaudeSessionDetailPage'
+import ClaudeStatsPage from './pages/ClaudeStatsPage'
+import ClaudeJournalPage from './pages/ClaudeJournalPage'
+import { checkCliAvailable } from './store/claudeSlice'
 
 export default function App(): JSX.Element {
   const { data: connection, isLoading, refetch } = useGetConnectionQuery()
@@ -37,6 +42,10 @@ export default function App(): JSX.Element {
     const off = window.ado.on('connection-changed', () => refetch())
     return off
   }, [refetch])
+
+  useEffect(() => {
+    void dispatch(checkCliAvailable())
+  }, [dispatch])
 
   // Deep-link from a desktop notification click or a tray menu pick.
   // We always navigate to /home and surface the right tab; opening the
@@ -105,6 +114,11 @@ export default function App(): JSX.Element {
         <Route path="/visualize" element={<VisualizePage />} />
         <Route path="/sprint" element={<SprintPage />} />
         <Route path="/wiki" element={<WikiPage />} />
+        <Route path="/claude" element={<Navigate to="/claude/sessions" replace />} />
+        <Route path="/claude/sessions" element={<ClaudeSessionsPage />} />
+        <Route path="/claude/sessions/:id" element={<ClaudeSessionDetailPage />} />
+        <Route path="/claude/stats" element={<ClaudeStatsPage />} />
+        <Route path="/claude/journal" element={<ClaudeJournalPage />} />
         {/* Back-compat: old per-view URLs redirect into the consolidated page. */}
         <Route path="/timeline" element={<Navigate to="/visualize?view=timeline" replace />} />
         <Route path="/hierarchy" element={<Navigate to="/visualize?view=hierarchy" replace />} />

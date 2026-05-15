@@ -20,6 +20,7 @@ import InsightsIcon from '@mui/icons-material/Insights'
 import DirectionsRunIcon from '@mui/icons-material/DirectionsRun'
 import HomeIcon from '@mui/icons-material/Home'
 import MenuBookIcon from '@mui/icons-material/MenuBook'
+import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome'
 import LightModeIcon from '@mui/icons-material/LightMode'
 import DarkModeIcon from '@mui/icons-material/DarkMode'
 import SettingsBrightnessIcon from '@mui/icons-material/SettingsBrightness'
@@ -90,7 +91,8 @@ const NAV: NavEntry[] = [
   { to: '/home', label: 'Home', icon: <HomeIcon /> },
   { to: '/visualize', label: 'Visualize', icon: <InsightsIcon /> },
   { to: '/sprint', label: 'Sprint', icon: <DirectionsRunIcon /> },
-  { to: '/wiki', label: 'Wiki', icon: <MenuBookIcon /> }
+  { to: '/wiki', label: 'Wiki', icon: <MenuBookIcon /> },
+  { to: '/claude/sessions', label: 'Claude', icon: <AutoAwesomeIcon /> }
 ]
 
 const THEME_MODE_LABEL: Record<ThemeMode, string> = {

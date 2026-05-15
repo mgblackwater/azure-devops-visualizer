@@ -26,6 +26,20 @@ import type {
   AdoWorkItemTypeState,
   PullRequestChangesSummary
 } from './adoTypes'
+import type {
+  ClaudeCliAvailableResult,
+  GenerateJournalArgs,
+  GenerateJournalResult,
+  GetSessionArgs,
+  GetStatsArgs,
+  ListSessionsArgs,
+  RescanIndexResult,
+  SessionDetail,
+  SessionMeta,
+  StatsBucket,
+  SummarizeSessionArgs,
+  SummarizeSessionResult
+} from './claudeTypes'
 
 /**
  * Marker prefix used to smuggle structured `IpcError` payloads through
@@ -211,7 +225,16 @@ export const IPC = {
    * cache uses so toggling the dialog open / shut for the same PR
    * doesn't re-hit the network.
    */
-  GitPullRequestChanges: 'git.pr.changes'
+  GitPullRequestChanges: 'git.pr.changes',
+
+  /* ---------- Claude session tracker ---------- */
+  ClaudeListSessions: 'claude.listSessions',
+  ClaudeGetSession: 'claude.getSession',
+  ClaudeGetStats: 'claude.getStats',
+  ClaudeSummarizeSession: 'claude.summarizeSession',
+  ClaudeGenerateJournal: 'claude.generateJournal',
+  ClaudeRescanIndex: 'claude.rescanIndex',
+  ClaudeCliAvailable: 'claude.cliAvailable'
 } as const
 
 /**
@@ -634,6 +657,27 @@ export interface IpcSignatures {
   [IPC.GitPullRequestChanges]: {
     args: GetPullRequestChangesArgs
     result: GetPullRequestChangesResult
+  }
+
+  /* ---- Claude session tracker ---- */
+  [IPC.ClaudeListSessions]: { args: ListSessionsArgs; result: SessionMeta[] }
+  [IPC.ClaudeGetSession]: { args: GetSessionArgs; result: SessionDetail }
+  [IPC.ClaudeGetStats]: { args: GetStatsArgs; result: StatsBucket[] }
+  [IPC.ClaudeSummarizeSession]: {
+    args: SummarizeSessionArgs
+    result: SummarizeSessionResult
+  }
+  [IPC.ClaudeGenerateJournal]: {
+    args: GenerateJournalArgs
+    result: GenerateJournalResult
+  }
+  [IPC.ClaudeRescanIndex]: {
+    args: Record<string, never>
+    result: RescanIndexResult
+  }
+  [IPC.ClaudeCliAvailable]: {
+    args: Record<string, never>
+    result: ClaudeCliAvailableResult
   }
 }
 
