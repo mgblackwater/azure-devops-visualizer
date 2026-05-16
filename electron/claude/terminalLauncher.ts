@@ -12,10 +12,12 @@ function escapeAppleScriptString(s: string): string {
 
 /**
  * Build the inner claude command line. When `prompt` is provided we start
- * a fresh interactive session pre-seeded with that prompt; otherwise we
- * resume an existing session by id. The prompt is single-quoted for
- * PowerShell consumption (embedded single-quotes get doubled, PS escape
- * rules) so multi-line content with quotes survives the shell hop.
+ * a fresh interactive session with that prompt as the first user message;
+ * otherwise we resume an existing session by id. The prompt is expected
+ * to be SHORT (the caller is responsible for spilling long content to a
+ * file and asking Claude to read it as a first action) — Windows
+ * CreateProcess caps total argv at ~32 KB, so anything bigger gets
+ * silently truncated.
  */
 function buildClaudeCommandPs(opts: {
   sessionId?: string
@@ -31,14 +33,14 @@ function buildClaudeCommandPs(opts: {
 /**
  * PowerShell `-EncodedCommand` expects a base64 UTF-16LE string. Using
  * this instead of `-Command "..."` sidesteps cmd.exe's line-terminator
- * and quote-handling quirks entirely, so multi-line prompts and embedded
- * quotes survive the `cmd /c start` hop without escaping issues.
+ * and quote-handling quirks entirely, so the inner PowerShell snippet
+ * (with its file-path single-quotes) survives the `cmd /c start` hop.
  */
 function encodePowerShell(command: string): string {
   return Buffer.from(command, 'utf16le').toString('base64')
 }
 
-/** POSIX (bash / zsh) single-quote escape: close quote, escape, reopen. */
+/** POSIX (bash / zsh) variant — same single-quoted-arg approach. */
 function buildClaudeCommandPosix(opts: {
   sessionId?: string
   prompt?: string
@@ -189,10 +191,11 @@ export function openSessionInTerminal(args: {
 }
 
 /**
- * Start a fresh interactive Claude session pre-seeded with `prompt`.
- * Mirrors `openSessionInTerminal` but takes a prompt instead of a session
- * id, so callers like the ADO work-item drawer can hand off context
- * (title + description + comments) without first creating a session.
+ * Start a fresh interactive Claude session pre-seeded with `prompt`. The
+ * prompt is sent as Claude's first user message via the positional argv,
+ * so it must stay SHORT — Windows CreateProcess caps total argv at
+ * ~32 KB. Callers with long content should spill it to a file and pass
+ * a tiny instruction that asks Claude to read the file.
  */
 export function startSessionInTerminal(args: {
   cwd: string

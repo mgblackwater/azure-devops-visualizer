@@ -95,6 +95,14 @@ export type OpenInTerminalResult =
 export type StartInTerminalArgs = {
   cwd: string
   prompt: string
+  /**
+   * Optional reference material that gets written to a temp file and
+   * mentioned in the prompt. Use this for work-item description + comments
+   * + image data URIs etc. — anything that's too long to fit in a CLI
+   * arg cleanly. The user's `prompt` stays unchanged; only a short
+   * "Full context file: <path>" line is appended.
+   */
+  contextContent?: string
   shell: TerminalShell
 }
 export type StartInTerminalResult =

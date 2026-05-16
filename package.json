@@ -1,6 +1,6 @@
 {
   "name": "azure-devops-visualizer",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "description": "Custom Azure DevOps work item visualizer (Timeline, Graph, Hierarchy, Calendar) built on Electron + React.",
   "main": "out/main/main.js",

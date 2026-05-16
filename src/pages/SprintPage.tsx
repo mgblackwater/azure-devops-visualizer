@@ -3,9 +3,11 @@ import {
   Alert,
   AlertTitle,
   Autocomplete,
+  Badge,
   Box,
   Button,
   Chip,
+  Collapse,
   FormControlLabel,
   IconButton,
   InputAdornment,
@@ -21,6 +23,8 @@ import {
 } from '@mui/material'
 import RefreshIcon from '@mui/icons-material/Refresh'
 import SearchIcon from '@mui/icons-material/Search'
+import FilterListIcon from '@mui/icons-material/FilterList'
+import CloseIcon from '@mui/icons-material/Close'
 import ClearIcon from '@mui/icons-material/Clear'
 import ViewWeekIcon from '@mui/icons-material/ViewWeek'
 import TableChartIcon from '@mui/icons-material/TableChart'
@@ -81,6 +85,13 @@ function timeFrameRank(tf?: 'past' | 'current' | 'future'): number {
 }
 
 /** Pull the human-readable message out of an RTK Query error wrapping IpcError. */
+function shortTypeLabel(type: string): string {
+  if (type === 'Product Backlog Item') return 'PBI'
+  if (type === 'User Story') return 'Story'
+  if (type === 'Requirement') return 'Req'
+  return type
+}
+
 function ipcErrorMessage(err: unknown): string | null {
   if (!err) return null
   const e = err as { data?: { message?: string }; error?: string }
@@ -213,17 +224,20 @@ export default function SprintPage(): JSX.Element {
   /** Selected work-item types to include as rows. Empty = show all. */
   const [selectedTypes, setSelectedTypes] = useState<string[]>([])
   /**
-   * Selected ADO `System.State` names. When non-empty, only tasks whose
-   * state is in the set appear inside the Kanban lanes. The set holds raw
-   * state names ("New", "Active", "Resolved", …), not the normalised lane
-   * keys, so the user can disambiguate states that share a lane (e.g.
-   * filter "Pending Review" without also pulling in "Active").
+   * Selected ADO `System.State` names, grouped by work-item type. ADO state
+   * names overlap inconsistently across types ("Active" exists on Bugs but
+   * not PBIs; PBIs have "Approved"/"Committed" that Bugs lack), so a single
+   * flat list of selected states caused the filter to mis-fire — picking
+   * "Active" would silently hide all PBIs because none have that state.
    *
+   * Map shape: `{ "Product Backlog Item": ["Approved"], "Task": ["In Progress"], "Bug": [] }`.
+   * Empty array for a type = no filter applied to items of that type.
    * Standalone rows (a PBI/Bug without children) are also filtered by
-   * their *own* state so the row strip itself respects the filter — a
-   * lone Bug that's "New" stays hidden when the user filters to "Active".
+   * their *own* state so the row strip respects the filter.
    */
-  const [selectedStates, setSelectedStates] = useState<string[]>([])
+  const [selectedStatesByType, setSelectedStatesByType] = useState<
+    Record<string, string[]>
+  >({})
   /**
    * Free-text filter that runs across the row's PBI/Bug fields *and* every
    * task under it. Tokenized on whitespace; a row is kept when every
@@ -233,6 +247,8 @@ export default function SprintPage(): JSX.Element {
    */
   const [textFilter, setTextFilter] = useState('')
   const [viewMode, setViewMode] = useState<'matrix' | 'kanban'>('kanban')
+  /** Right-side drawer holding the heavy filter UI (type / user / status). */
+  const [filterDrawerOpen, setFilterDrawerOpen] = useState(false)
 
   // Team selection lives on this page since iterations are team-scoped.
   // The list itself is project-scoped, so we kick it off as soon as a
@@ -415,27 +431,131 @@ export default function SprintPage(): JSX.Element {
    * strip reads left-to-right as To Do → In Progress → Done; within a
    * lane states are sorted alphabetically for stability.
    */
-  const availableStates = useMemo(() => {
-    const present = new Set<string>()
+  const availableStatesByType = useMemo(() => {
+    const byType = new Map<string, Set<string>>()
+    const add = (type: string, state: string): void => {
+      if (!type || !state) return
+      let set = byType.get(type)
+      if (!set) {
+        set = new Set<string>()
+        byType.set(type, set)
+      }
+      set.add(state)
+    }
     for (const { pbi, tasks } of rows) {
-      present.add(getState(pbi))
-      for (const t of tasks) present.add(getState(t))
+      add(getType(pbi), getState(pbi))
+      for (const t of tasks) add(getType(t), getState(t))
     }
     const laneOrder: Record<string, number> = {
       todo: 0,
       inProgress: 1,
       done: 2
     }
-    return [...present].sort((a, b) => {
-      const la = laneOrder[laneOf(a)] ?? 99
-      const lb = laneOrder[laneOf(b)] ?? 99
-      if (la !== lb) return la - lb
-      return a.localeCompare(b)
-    })
+    // Stable type order: Task last (it's the child rail), parents first
+    // alphabetised among themselves.
+    const typeOrder = (type: string): number => {
+      if (type === 'Task') return 2
+      if (type === 'Bug' || type === 'Defect') return 1
+      return 0
+    }
+    return [...byType.entries()]
+      .map(([type, set]) => ({
+        type,
+        states: [...set].sort((a, b) => {
+          const la = laneOrder[laneOf(a)] ?? 99
+          const lb = laneOrder[laneOf(b)] ?? 99
+          if (la !== lb) return la - lb
+          return a.localeCompare(b)
+        })
+      }))
+      .sort((a, b) => {
+        const ta = typeOrder(a.type)
+        const tb = typeOrder(b.type)
+        if (ta !== tb) return ta - tb
+        return a.type.localeCompare(b.type)
+      })
   }, [rows])
 
-  const stateFilterActive = selectedStates.length > 0
-  const stateSet = useMemo(() => new Set(selectedStates), [selectedStates])
+  const stateFilterActive = useMemo(
+    () => Object.values(selectedStatesByType).some((arr) => arr.length > 0),
+    [selectedStatesByType]
+  )
+
+  // When the user narrows by type, only show that type's status filters.
+  // Mixing PBI/Bug/Task statuses on screen when the user has hidden the
+  // other types just adds noise.
+  const visibleStatesByType = useMemo(() => {
+    if (selectedTypes.length === 0) return availableStatesByType
+    const set = new Set(selectedTypes)
+    return availableStatesByType.filter(({ type }) => set.has(type))
+  }, [availableStatesByType, selectedTypes])
+
+  // Drives the Badge on the "Filters" button — counts only filters that
+  // live INSIDE the drawer (type + status). User filter, include-tasks
+  // toggle, and text search are visible in the main toolbar so they
+  // don't contribute to this badge.
+  const drawerFilterCount = useMemo(() => {
+    let n = 0
+    if (typeFilterActive) n += 1
+    if (stateFilterActive) n += 1
+    return n
+  }, [typeFilterActive, stateFilterActive])
+  // Per-type sets for O(1) membership checks inside the row pipeline.
+  const stateSetsByType = useMemo(() => {
+    const out: Record<string, Set<string>> = {}
+    for (const [type, arr] of Object.entries(selectedStatesByType)) {
+      if (arr.length > 0) out[type] = new Set(arr)
+    }
+    return out
+  }, [selectedStatesByType])
+
+  /** True when the item's type has any state filter AND the item's state isn't in it. */
+  function stateRejected(workItem: typeof rows[number]['pbi']): boolean {
+    const set = stateSetsByType[getType(workItem)]
+    if (!set) return false
+    return !set.has(getState(workItem))
+  }
+
+  /**
+   * Plain click on a chip = "show only this state" (drops everything else
+   * for that type, or clears if you clicked the sole selection).
+   * Shift/Ctrl/Meta-click = toggle this state in the multi-select set.
+   *
+   * The single-click "focus" behaviour matches how most filter UIs feel:
+   * users overwhelmingly want one filter at a time, and forcing them to
+   * deselect every other chip when they really meant "only this one" is
+   * a constant papercut.
+   */
+  function clickStateForType(
+    type: string,
+    state: string,
+    additive: boolean
+  ): void {
+    setSelectedStatesByType((prev) => {
+      const curr = prev[type] ?? []
+      if (additive) {
+        const next = curr.includes(state)
+          ? curr.filter((s) => s !== state)
+          : [...curr, state]
+        return { ...prev, [type]: next }
+      }
+      // Plain click — single-select (or toggle off when already alone).
+      const onlyThis = curr.length === 1 && curr[0] === state
+      return { ...prev, [type]: onlyThis ? [] : [state] }
+    })
+  }
+
+  function clickTypeChip(type: string, additive: boolean): void {
+    setSelectedTypes((prev) => {
+      if (additive) {
+        return prev.includes(type)
+          ? prev.filter((t) => t !== type)
+          : [...prev, type]
+      }
+      const onlyThis = prev.length === 1 && prev[0] === type
+      return onlyThis ? [] : [type]
+    })
+  }
 
   /**
    * Pre-tokenized text filter. Min length 1 (vs. 2 for ADO search) — the
@@ -484,7 +604,7 @@ export default function SprintPage(): JSX.Element {
           filteredTasks = filteredTasks.filter(matchesUserFilter)
         }
         if (stateFilterActive) {
-          filteredTasks = filteredTasks.filter((t) => stateSet.has(getState(t)))
+          filteredTasks = filteredTasks.filter((t) => !stateRejected(t))
         }
         return { pbi, tasks: filteredTasks, allTasks: tasks }
       })
@@ -500,18 +620,18 @@ export default function SprintPage(): JSX.Element {
             return false
           }
         }
-        // State filter behaviour:
-        //   - A row with children: keep it if at least one task survived
-        //     the state filter (i.e. `tasks.length > 0` after filtering).
-        //   - A row with no children (standalone PBI/Bug): keep it only
-        //     if the row's *own* state matches — otherwise the row strip
-        //     contains nothing relevant to the chosen filter.
+        // State filter behaviour (per-type):
+        //   - The parent's type filter ALWAYS hides the row when the
+        //     parent's state isn't in the allowed set. If the user is
+        //     filtering PBIs to "Verified", a PBI in "Ready for SIT"
+        //     must not appear at all — even when its child tasks are
+        //     "In Progress" and would survive the task filter.
+        //   - For rows with children, the task filter additionally
+        //     requires at least one task to survive (otherwise the row
+        //     becomes an empty container).
         if (stateFilterActive) {
-          if (allTasks.length === 0) {
-            if (!stateSet.has(getState(pbi))) return false
-          } else {
-            if (tasks.length === 0) return false
-          }
+          if (stateRejected(pbi)) return false
+          if (allTasks.length > 0 && tasks.length === 0) return false
         }
         // Text filter runs against the *unfiltered* task list so the
         // user's search isn't accidentally hidden by the user/state
@@ -530,7 +650,7 @@ export default function SprintPage(): JSX.Element {
     userKeySet,
     typeSet,
     includeTasksInFilter,
-    stateSet,
+    stateSetsByType,
     textTokens
   ])
 
@@ -747,18 +867,31 @@ export default function SprintPage(): JSX.Element {
             }
           }}
         />
+        <Tooltip
+          title={
+            drawerFilterCount === 0
+              ? 'Open filters drawer'
+              : `${drawerFilterCount} active filter${drawerFilterCount === 1 ? '' : 's'}`
+          }
+        >
+          <Badge
+            badgeContent={drawerFilterCount}
+            color="primary"
+            overlap="rectangular"
+          >
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<FilterListIcon />}
+              onClick={() => setFilterDrawerOpen(true)}
+            >
+              Filters
+            </Button>
+          </Badge>
+        </Tooltip>
         <Autocomplete<UserOption, true>
           multiple
           size="small"
-          // Don't `flex-grow` the user filter — it would steal space from
-          // every other control and force them to wrap before they need to.
-          // It still shrinks when the row is tight (down to ~180px).
-          //
-          // Tighten the inner padding and chip margins so the field stays
-          // the same height as a sibling small TextField even after a
-          // chip is selected. Without this MUI's default chip (24px) +
-          // multi-input padding pushes the field ~10px taller than its
-          // neighbours, which made the toolbar look misaligned.
           sx={{
             flex: '0 1 260px',
             minWidth: 180,
@@ -842,8 +975,8 @@ export default function SprintPage(): JSX.Element {
         <Tooltip
           title={
             includeTasksInFilter
-              ? 'Filter also matches task assignees and narrows lanes to matching tasks'
-              : 'Filter only matches the PBI/Bug owner — all tasks under a matching row stay visible'
+              ? 'User filter also matches task assignees and narrows lanes to matching tasks'
+              : 'User filter only matches the PBI/Bug owner — all tasks under a matching row stay visible'
           }
         >
           <FormControlLabel
@@ -857,152 +990,10 @@ export default function SprintPage(): JSX.Element {
             label="Include tasks"
           />
         </Tooltip>
-        {availableTypes.length > 1 && (
-          <Stack
-            direction="row"
-            useFlexGap
-            flexWrap="wrap"
-            spacing={0.5}
-            alignItems="center"
-            // Allow the chip strip itself to wrap on very narrow windows so
-            // we don't end up with a single long block that overflows.
-            sx={{ rowGap: 0.5 }}
-          >
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              sx={{ mr: 0.25 }}
-            >
-              Types:
-            </Typography>
-            {availableTypes.map((type) => {
-              // When no filter is active every chip is shown as "active"; once
-              // the user starts selecting, only the chosen ones stay filled.
-              const active = !typeFilterActive || typeSet.has(type)
-              const color = colorForType(type)
-              return (
-                <Chip
-                  key={type}
-                  size="small"
-                  label={typeBadge(type)}
-                  onClick={() =>
-                    setSelectedTypes((prev) =>
-                      prev.includes(type)
-                        ? prev.filter((t) => t !== type)
-                        : [...prev, type]
-                    )
-                  }
-                  sx={{
-                    height: 22,
-                    cursor: 'pointer',
-                    bgcolor: active ? color : 'transparent',
-                    color: active ? readableTextColor(color) : color,
-                    border: `1px solid ${color}`,
-                    fontWeight: 700,
-                    '& .MuiChip-label': {
-                      px: 0.75,
-                      fontSize: 10,
-                      letterSpacing: 0.3
-                    },
-                    '&:hover': { opacity: 0.85 }
-                  }}
-                />
-              )
-            })}
-            {typeFilterActive && (
-              <Tooltip title="Clear type filter">
-                <Chip
-                  size="small"
-                  label="all"
-                  onClick={() => setSelectedTypes([])}
-                  sx={{
-                    height: 22,
-                    cursor: 'pointer',
-                    bgcolor: 'transparent',
-                    color: 'text.secondary',
-                    border: '1px dashed',
-                    borderColor: 'divider',
-                    '& .MuiChip-label': { px: 0.75, fontSize: 10 }
-                  }}
-                />
-              </Tooltip>
-            )}
-          </Stack>
-        )}
-        {/* Show the status filter strip whenever it's relevant: in Kanban
-            mode (its primary use), or whenever a status filter is active
-            (so it can't be set in Kanban and silently keep filtering Matrix
-            view rows after switching). */}
-        {(viewMode === 'kanban' || stateFilterActive) && availableStates.length > 1 && (
-          <Stack
-            direction="row"
-            useFlexGap
-            flexWrap="wrap"
-            spacing={0.5}
-            alignItems="center"
-            sx={{ rowGap: 0.5 }}
-          >
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              sx={{ mr: 0.25 }}
-            >
-              Status:
-            </Typography>
-            {availableStates.map((state) => {
-              const active = !stateFilterActive || stateSet.has(state)
-              const color = colorForState(state)
-              return (
-                <Chip
-                  key={state}
-                  size="small"
-                  label={state}
-                  onClick={() =>
-                    setSelectedStates((prev) =>
-                      prev.includes(state)
-                        ? prev.filter((s) => s !== state)
-                        : [...prev, state]
-                    )
-                  }
-                  sx={{
-                    height: 22,
-                    cursor: 'pointer',
-                    bgcolor: active ? color : 'transparent',
-                    color: active ? readableTextColor(color) : color,
-                    border: `1px solid ${color}`,
-                    fontWeight: 600,
-                    '& .MuiChip-label': {
-                      px: 0.75,
-                      fontSize: 11
-                    },
-                    '&:hover': { opacity: 0.85 }
-                  }}
-                />
-              )
-            })}
-            {stateFilterActive && (
-              <Tooltip title="Clear status filter">
-                <Chip
-                  size="small"
-                  label="all"
-                  onClick={() => setSelectedStates([])}
-                  sx={{
-                    height: 22,
-                    cursor: 'pointer',
-                    bgcolor: 'transparent',
-                    color: 'text.secondary',
-                    border: '1px dashed',
-                    borderColor: 'divider',
-                    '& .MuiChip-label': { px: 0.75, fontSize: 10 }
-                  }}
-                />
-              </Tooltip>
-            )}
-          </Stack>
-        )}
-        <Tooltip title="Includes PBIs / User Stories / Requirements / Bugs / Defects">
-          <Chip size="small" label={`${filteredRows.length}/${rows.length} rows`} />
-        </Tooltip>
+        <Chip
+          size="small"
+          label={`${filteredRows.length}/${rows.length} rows`}
+        />
         <ToggleButtonGroup
           size="small"
           exclusive
@@ -1050,6 +1041,190 @@ export default function SprintPage(): JSX.Element {
             : 'Each row is a PBI · drag tasks between lanes to update state · click a card to open'}
         </Typography>
       </Stack>
+
+      <Collapse in={filterDrawerOpen} unmountOnExit>
+        <Box
+          sx={{
+            p: 2,
+            borderBottom: '1px solid',
+            borderColor: 'divider',
+            bgcolor: 'background.paper'
+          }}
+        >
+          <Stack spacing={2}>
+            <Stack direction="row" alignItems="center" spacing={1}>
+              <FilterListIcon fontSize="small" />
+              <Typography variant="subtitle2" sx={{ flex: 1 }}>
+                Filters
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                Click a chip to focus · Shift-click to add / remove
+              </Typography>
+              {drawerFilterCount > 0 && (
+                <Button
+                  size="small"
+                  onClick={() => {
+                    setSelectedTypes([])
+                    setSelectedStatesByType({})
+                  }}
+                >
+                  Reset
+                </Button>
+              )}
+              <IconButton
+                size="small"
+                onClick={() => setFilterDrawerOpen(false)}
+                aria-label="Close filters"
+              >
+                <CloseIcon fontSize="small" />
+              </IconButton>
+            </Stack>
+
+            {/* Type filter row */}
+            {availableTypes.length > 1 && (
+              <Stack direction="row" useFlexGap flexWrap="wrap" spacing={0.5} alignItems="center">
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ minWidth: 64 }}
+                >
+                  Type:
+                </Typography>
+                {availableTypes.map((type) => {
+                  const active = !typeFilterActive || typeSet.has(type)
+                  const color = colorForType(type)
+                  return (
+                    <Chip
+                      key={type}
+                      size="small"
+                      label={typeBadge(type)}
+                      onClick={(e) =>
+                        clickTypeChip(
+                          type,
+                          e.shiftKey || e.metaKey || e.ctrlKey
+                        )
+                      }
+                      sx={{
+                        height: 24,
+                        cursor: 'pointer',
+                        bgcolor: active ? color : 'transparent',
+                        color: active ? readableTextColor(color) : color,
+                        border: `1px solid ${color}`,
+                        fontWeight: 700,
+                        '& .MuiChip-label': {
+                          px: 0.75,
+                          fontSize: 11,
+                          letterSpacing: 0.3
+                        },
+                        '&:hover': { opacity: 0.85 }
+                      }}
+                    />
+                  )
+                })}
+                {typeFilterActive && (
+                  <Chip
+                    size="small"
+                    label="clear"
+                    onClick={() => setSelectedTypes([])}
+                    sx={{
+                      height: 24,
+                      cursor: 'pointer',
+                      bgcolor: 'transparent',
+                      color: 'text.secondary',
+                      border: '1px dashed',
+                      borderColor: 'divider',
+                      '& .MuiChip-label': { px: 0.75, fontSize: 10 }
+                    }}
+                  />
+                )}
+              </Stack>
+            )}
+
+            {/* Status filters per type */}
+            {visibleStatesByType.length > 0 && (
+              <Stack spacing={0.5}>
+                {visibleStatesByType.map(({ type, states }) => {
+                  if (states.length < 2 && !stateFilterActive) return null
+                  const selected = selectedStatesByType[type] ?? []
+                  const typeFilterIsOn = selected.length > 0
+                  return (
+                    <Stack
+                      key={type}
+                      direction="row"
+                      useFlexGap
+                      flexWrap="wrap"
+                      spacing={0.5}
+                      alignItems="center"
+                    >
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ minWidth: 64 }}
+                      >
+                        {shortTypeLabel(type)}:
+                      </Typography>
+                      {states.map((state) => {
+                        const active = !typeFilterIsOn || selected.includes(state)
+                        const color = colorForState(state)
+                        return (
+                          <Chip
+                            key={state}
+                            size="small"
+                            label={state}
+                            onClick={(e) =>
+                              clickStateForType(
+                                type,
+                                state,
+                                e.shiftKey || e.metaKey || e.ctrlKey
+                              )
+                            }
+                            sx={{
+                              height: 24,
+                              cursor: 'pointer',
+                              bgcolor: active ? color : 'transparent',
+                              color: active
+                                ? readableTextColor(color)
+                                : color,
+                              border: `1px solid ${color}`,
+                              fontWeight: 600,
+                              '& .MuiChip-label': {
+                                px: 0.75,
+                                fontSize: 11
+                              },
+                              '&:hover': { opacity: 0.85 }
+                            }}
+                          />
+                        )
+                      })}
+                      {typeFilterIsOn && (
+                        <Chip
+                          size="small"
+                          label="clear"
+                          onClick={() =>
+                            setSelectedStatesByType((prev) => ({
+                              ...prev,
+                              [type]: []
+                            }))
+                          }
+                          sx={{
+                            height: 24,
+                            cursor: 'pointer',
+                            bgcolor: 'transparent',
+                            color: 'text.secondary',
+                            border: '1px dashed',
+                            borderColor: 'divider',
+                            '& .MuiChip-label': { px: 0.75, fontSize: 10 }
+                          }}
+                        />
+                      )}
+                    </Stack>
+                  )
+                })}
+              </Stack>
+            )}
+          </Stack>
+        </Box>
+      </Collapse>
 
       <Box sx={{ position: 'relative', flex: 1, overflow: 'auto', minHeight: 0 }}>
         {(wiqlQ.isFetching || batchQ.isFetching) && (
@@ -1124,7 +1299,7 @@ export default function SprintPage(): JSX.Element {
                   variant="outlined"
                   onClick={() => {
                     setTextFilter('')
-                    setSelectedStates([])
+                    setSelectedStatesByType({})
                     setSelectedTypes([])
                     setSelectedUsers([])
                   }}
@@ -1162,6 +1337,7 @@ export default function SprintPage(): JSX.Element {
           {dragError}
         </Alert>
       </Snackbar>
+
     </Box>
   )
 }

@@ -27,7 +27,7 @@ import type { AdoComment, AdoWorkItem } from '@shared/adoTypes'
 
 //* Props ---
 
-export interface StartClaudeDialogProps {
+export interface WorkWithClaudeDialogProps {
   open: boolean
   onClose: () => void
   item: AdoWorkItem
@@ -38,7 +38,7 @@ export interface StartClaudeDialogProps {
 
 //* Styled ---
 
-const PromptArea = styled(TextField)`
+const Mono = styled(TextField)`
   & textarea {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 13px;
@@ -48,6 +48,21 @@ const PromptArea = styled(TextField)`
 
 const PathRow = styled(Stack)`
   align-items: stretch;
+`
+
+const SectionLabel = styled.div`
+  font-size: 11px;
+  font-weight: 600;
+  color: ${({ theme }) => theme.palette.text.secondary};
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+`
+
+const SectionHint = styled.div`
+  font-size: 11px;
+  color: ${({ theme }) => theme.palette.text.secondary};
+  margin-top: 4px;
 `
 
 //* Helpers ---
@@ -62,42 +77,53 @@ const SHELL_OPTIONS_MAC: { value: TerminalShell; label: string }[] = [
   { value: 'iterm2', label: 'iTerm2' }
 ]
 
-function buildDefaultIntroBlock(item: AdoWorkItem): string {
+/**
+ * Default prompt delegates to the gpc-dev plugin's gpc-implementation-plan
+ * skill. The skill fetches the work item from ADO, maps it to legacy code,
+ * identifies the revamp target module, and produces a step-by-step plan.
+ * Kept short so the user can edit / replace freely.
+ */
+function buildDefaultPrompt(item: AdoWorkItem): string {
   const id = item.id
   const type =
     (item.fields['System.WorkItemType'] as string | undefined) ?? 'Work Item'
   const title =
     (item.fields['System.Title'] as string | undefined) ?? '(no title)'
-  return `Please implement the following Azure DevOps ${type} (#${id}).
 
-Read the title, description, and any comments below. Plan the change, ask for clarification only on genuine blockers, then make the edits.
+  return `Please invoke the \`gpc-dev:gpc-implementation-plan\` skill to plan implementation of Azure DevOps ${type} #${id} — "${title}".
 
-# ${type} #${id}: ${title}
-`
+After the plan is approved, dispatch to the right skill for each step:
+- Frontend (React / GPConnect_Web) → \`gpc-dev:gpc-frontend-development\`
+- Backend (.NET 8 / GPConnect_WebAPI) → \`gpc-dev:gpc-backend-development\`
+- Database — tables, SPs, entities → \`gpc-data:gpc-database\`
+- Background workers → \`gpc-dev:gpc-worker-service\`
+- Code review when done → \`gpc-dev:gpc-code-review-frontend\` / \`gpc-dev:gpc-code-review-backend\`
+- Git workflow (branch / commit / push / PR) → \`gpc-dev:gpc-git\``
 }
 
 //* FC ---
 
-export default function StartClaudeDialog({
+export default function WorkWithClaudeDialog({
   open,
   onClose,
   item,
   orgUrl,
   projectId,
   comments
-}: StartClaudeDialogProps): JSX.Element {
+}: WorkWithClaudeDialogProps): JSX.Element {
   const dispatch = useAppDispatch()
   const persistedPath = useAppSelector((s) =>
     selectClaudeRepoPath(s, projectId)
   )
 
   const [prompt, setPrompt] = useState('')
+  const [context, setContext] = useState('')
   const [path, setPath] = useState(persistedPath ?? '')
   const [shell, setShell] = useState<TerminalShell>(
     window.ado.platform === 'win32' ? 'wt' : 'macos-terminal'
   )
-  const [buildError, setBuildError] = useState<string | null>(null)
-  const [building, setBuilding] = useState(false)
+  const [buildingContext, setBuildingContext] = useState(false)
+  const [contextError, setContextError] = useState<string | null>(null)
   const [launching, setLaunching] = useState(false)
   const [launchError, setLaunchError] = useState<string | null>(null)
 
@@ -111,15 +137,22 @@ export default function StartClaudeDialog({
     []
   )
 
-  // Build the default prompt when the dialog opens. We rebuild on every
-  // open in case the item or comments have moved on since the user last
-  // saw it. Editable in the textarea afterwards.
+  // Default the prompt and reset error state every time the dialog opens.
+  useEffect(() => {
+    if (!open) return
+    setPrompt(buildDefaultPrompt(item))
+    setLaunchError(null)
+    setContextError(null)
+  }, [open, item])
+
+  // Build the work-item content block (description + metadata + comments
+  // + ADO-image data URIs) in the background each time the dialog opens.
+  // The user can wipe / edit / paste anything they want before sending.
   useEffect(() => {
     if (!open) return
     let cancelled = false
-    setBuildError(null)
-    setLaunchError(null)
-    setBuilding(true)
+    setBuildingContext(true)
+    setContext('')
     void (async () => {
       try {
         const result = await buildCopyBlob({
@@ -128,14 +161,11 @@ export default function StartClaudeDialog({
           comments,
           scope: 'descriptionMetaComments'
         })
-        if (cancelled) return
-        const intro = buildDefaultIntroBlock(item)
-        setPrompt(`${intro}\n${result.markdown}`)
+        if (!cancelled) setContext(result.markdown)
       } catch (err) {
-        if (cancelled) return
-        setBuildError((err as Error).message)
+        if (!cancelled) setContextError((err as Error).message)
       } finally {
-        if (!cancelled) setBuilding(false)
+        if (!cancelled) setBuildingContext(false)
       }
     })()
     return () => {
@@ -169,14 +199,13 @@ export default function StartClaudeDialog({
     setLaunching(true)
     setLaunchError(null)
     try {
-      // Persist before launching so the next open remembers, even if
-      // launch itself fails (helps when the user is iterating).
       if (projectId) {
         dispatch(setClaudeRepoPath({ projectId, path }))
       }
       await window.ado.invoke(IPC.ClaudeStartInTerminal, {
         cwd: path,
         prompt,
+        contextContent: context.trim() ? context : undefined,
         shell
       })
       onClose()
@@ -188,11 +217,11 @@ export default function StartClaudeDialog({
   }
 
   const canStart =
-    !!path && !!prompt.trim() && !launching && !building && shellOptions.length > 0
+    !!path && !!prompt.trim() && !launching && shellOptions.length > 0
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
-      <DialogTitle>Start Claude on this work item</DialogTitle>
+      <DialogTitle>Work with Claude</DialogTitle>
       <DialogContent>
         <Stack spacing={2} sx={{ pt: 1 }}>
           <PathRow direction="row" spacing={1}>
@@ -230,32 +259,61 @@ export default function StartClaudeDialog({
             </Select>
           </FormControl>
 
-          {buildError && <Alert severity="warning">{buildError}</Alert>}
           {launchError && <Alert severity="error">{launchError}</Alert>}
+          {contextError && (
+            <Alert severity="warning">
+              Couldn't build work-item content: {contextError}. You can still send the prompt alone.
+            </Alert>
+          )}
           {shellOptions.length === 0 && (
             <Alert severity="warning">
               No supported terminal on this platform ({window.ado.platform}). Currently Windows and macOS only.
             </Alert>
           )}
 
-          <PromptArea
-            label="Initial prompt (editable)"
-            multiline
-            minRows={12}
-            maxRows={24}
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            fullWidth
-            size="small"
-            disabled={building}
-            placeholder={building ? 'Building prompt from work item…' : ''}
-          />
+          <div>
+            <SectionLabel>Prompt — what to do</SectionLabel>
+            <Mono
+              multiline
+              minRows={8}
+              maxRows={14}
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              fullWidth
+              size="small"
+            />
+            <SectionHint>
+              Sent as the first chat message. Edit freely — defaults to the GPConnect implementation-plan skill.
+            </SectionHint>
+          </div>
+
+          <div>
+            <SectionLabel>Work item content — reference for Claude</SectionLabel>
+            <Mono
+              multiline
+              minRows={10}
+              maxRows={20}
+              value={context}
+              onChange={(e) => setContext(e.target.value)}
+              fullWidth
+              size="small"
+              placeholder={
+                buildingContext
+                  ? 'Building from work item description + comments…'
+                  : 'Description / metadata / comments. Wipe this if you want a prompt-only send.'
+              }
+              disabled={buildingContext}
+            />
+            <SectionHint>
+              Written to a temp file at launch; the prompt above gets a "Full context file: …" line appended so Claude knows where to read from. Leave empty to skip.
+            </SectionHint>
+          </div>
         </Stack>
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose}>Cancel</Button>
         <Button variant="contained" onClick={start} disabled={!canStart}>
-          {launching ? 'Starting…' : 'Start Claude'}
+          {launching ? 'Starting…' : 'Work with Claude'}
         </Button>
       </DialogActions>
     </Dialog>

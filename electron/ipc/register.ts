@@ -489,39 +489,47 @@ ${payload}
 
     [IPC.ClaudeStartInTerminal]: (_e, args) =>
       wrap(() => {
-        const { cwd, prompt, shell } = args as {
+        const { cwd, prompt, contextContent, shell } = args as {
           cwd: string
           prompt: string
+          contextContent?: string
           shell: import('@shared/claudeTypes').TerminalShell
         }
 
-        // Prompts built from ADO work items can run into the tens of KB
-        // once description HTML + comments + ADO-image data URIs land in
-        // them. Passing that as a CLI arg blows Windows' command-line
-        // limit (`spawn ENAMETOOLONG`). Spill the full payload to a temp
-        // file and hand Claude a SHORT pointer prompt that asks it to
-        // read the file. Threshold of 4KB is comfortably below every
-        // shell's quoted-arg limit while keeping small prompts inline.
-        let effectivePrompt = prompt
-        if (Buffer.byteLength(prompt, 'utf8') > 4096) {
-          const dir = path.join(os.tmpdir(), 'azdo-claude-prompts')
-          try {
-            fs.mkdirSync(dir, { recursive: true })
-          } catch {
-            // ignore — the writeFileSync below will surface a real error
-          }
-          const fileName = `ado-context-${Date.now()}.md`
-          const filePath = path.join(dir, fileName)
-          fs.writeFileSync(filePath, prompt, 'utf8')
-          // Single line on purpose — multi-line `-Command` values get
-          // truncated by cmd.exe's line-terminator handling on the way to
-          // PowerShell.
-          effectivePrompt = `I'm starting work on an Azure DevOps item. The full brief (title, description, metadata, comments, inline image data) is saved at ${filePath} — please read that file first, give me a one-paragraph summary plus a short implementation plan, then proceed.`
+        // Windows CreateProcess caps total argv at ~32 KB, so a large
+        // prompt (with description + comments + ADO image data URIs)
+        // gets silently truncated mid-way. Fix: never put the actual
+        // content in argv. Spill the full prompt + context to a single
+        // markdown file and hand Claude a SHORT instruction asking it
+        // to read the file as its first action. The instruction itself
+        // is ~250 chars — well under any shell / CLI limit.
+        const dir = path.join(os.tmpdir(), 'azdo-claude-prompts')
+        try {
+          fs.mkdirSync(dir, { recursive: true })
+        } catch {
+          // ignore — writeFileSync below will surface a real error
         }
+        const stamp = Date.now()
+        const briefFile = path.join(dir, `claude-brief-${stamp}.md`)
+
+        const sections: string[] = ['# Instructions', '', prompt.trim()]
+        if (contextContent && contextContent.trim()) {
+          sections.push(
+            '',
+            '---',
+            '',
+            '# Work Item Context (from Azure DevOps)',
+            '',
+            contextContent.trim()
+          )
+        }
+        fs.writeFileSync(briefFile, sections.join('\n') + '\n', 'utf8')
+
+        const wrapperPrompt = `Read the brief at ${briefFile} as your first action. It contains my instructions plus the Azure DevOps work-item context. After reading, proceed exactly as instructed.`
 
         const result = startSessionInTerminal({
           cwd,
-          prompt: effectivePrompt,
+          prompt: wrapperPrompt,
           shell
         })
         if (!result.ok) throw new Error(result.error)

@@ -53,7 +53,7 @@ import { relativeTime } from '@/utils/sanitize'
 import { normalizeMentionName, buildSubtreeWiql } from '@/utils/wiql'
 import RichDescription from './RichDescription'
 import CommentComposer from './comment/CommentComposer'
-import StartClaudeDialog from './StartClaudeDialog'
+import WorkWithClaudeDialog from './StartClaudeDialog'
 import StateChangerPopover from './StateChangerPopover'
 import TagEditorDialog from './TagEditorDialog'
 import WorkItemIdCopy from './WorkItemIdCopy'
@@ -649,7 +649,7 @@ export default function WorkItemDrawer(): JSX.Element {
             startIcon={<AutoAwesomeIcon />}
             onClick={() => setClaudeDialogOpen(true)}
           >
-            Start with Claude
+            Work with Claude
           </Button>
         </Stack>
       )}
@@ -913,7 +913,7 @@ export default function WorkItemDrawer(): JSX.Element {
             onSave={handleSaveTags}
           />
           {item && (
-            <StartClaudeDialog
+            <WorkWithClaudeDialog
               open={claudeDialogOpen}
               onClose={() => setClaudeDialogOpen(false)}
               item={item}
