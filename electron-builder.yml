@@ -1,5 +1,5 @@
-appId: com.adoviz.app
-productName: ADO Visualizer
+appId: com.workthread.app
+productName: Workthread
 asar: true
 directories:
   output: release/${version}
@@ -26,7 +26,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: ADO Visualizer
+  shortcutName: Workthread
 mac:
   target:
     - target: dmg

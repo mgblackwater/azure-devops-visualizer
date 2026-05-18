@@ -1,8 +1,8 @@
 {
-  "name": "azure-devops-visualizer",
-  "version": "0.4.2",
+  "name": "workthread",
+  "version": "0.5.0",
   "private": true,
-  "description": "Custom Azure DevOps work item visualizer (Timeline, Graph, Hierarchy, Calendar) built on Electron + React.",
+  "description": "Workthread — a desktop Azure DevOps work-item visualizer (Timeline, Graph, Hierarchy, Calendar) with a built-in Claude session tracker. Built on Electron + React.",
   "main": "out/main/main.js",
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "build:icons": "node scripts/build-icons.mjs",
     "package": "electron-vite build && electron-builder --win --x64",
     "package:dir": "electron-vite build && electron-builder --dir",
     "test": "vitest run",
@@ -69,6 +70,8 @@
     "electron": "^32.2.5",
     "electron-builder": "^25.1.8",
     "electron-vite": "^2.3.0",
+    "png-to-ico": "^3.0.1",
+    "sharp": "^0.34.5",
     "typescript": "^5.6.3",
     "vite": "^5.4.11",
     "vitest": "^4.1.6"

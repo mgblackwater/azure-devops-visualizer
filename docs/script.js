@@ -1,4 +1,4 @@
-/* ADO Visualizer — landing page interactivity.
+/* Workthread — landing page interactivity.
    Tiny by design: theme toggle (with localStorage persistence) plus a small
    smooth-scroll guard for in-page anchors. No frameworks, no analytics. */
 

@@ -29,7 +29,13 @@ function createMainWindow(): void {
     minHeight: 700,
     show: false,
     autoHideMenuBar: true,
-    title: 'Azure DevOps Visualizer',
+    title: 'Workthread',
+    // Window/taskbar icon. Resolved via `app.getAppPath()` so the same
+    // path works in dev (project root) and in prod (asar root), matching
+    // the tray-icon strategy in electron/notifications/tray.ts. On
+    // packaged builds the installer also embeds build/icon.ico via
+    // electron-builder, so this primarily covers the dev launcher.
+    icon: path.join(app.getAppPath(), 'electron', 'assets', 'app-icon.png'),
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.cjs'),
       contextIsolation: true,
@@ -84,6 +90,16 @@ if (!gotTheLock) {
   })
 
   void app.whenReady().then(() => {
+    // Bind the running process to the Workthread app identity. On
+    // Windows this controls taskbar grouping, the pinned-shortcut icon,
+    // and the icon shown in toast notifications. Without it, dev runs
+    // inherit `electron.exe`'s default icon even though the window
+    // itself uses build/icon.ico — which is the symptom we'd see as
+    // "title changed but taskbar icon didn't".
+    if (process.platform === 'win32') {
+      app.setAppUserModelId('com.workthread.app')
+    }
+
     registerIpcHandlers(ipcMain)
 
     onConnectionChanged((info) => {

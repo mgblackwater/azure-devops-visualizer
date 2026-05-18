@@ -78,7 +78,7 @@ jobs:
         # identity found" warning on macOS; we ship unsigned dmgs since
         # signing requires an Apple Developer account ($99/yr). Users can
         # bypass Gatekeeper on first launch via right-click → Open, or
-        # `xattr -cr "/Applications/ADO Visualizer.app"` if quarantined.
+        # `xattr -cr "/Applications/Workthread.app"` if quarantined.
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
         run: npx electron-builder ${{ matrix.builder-args }} --publish never
@@ -97,7 +97,7 @@ jobs:
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ado-visualizer-${{ matrix.label }}-${{ github.sha }}
+          name: workthread-${{ matrix.label }}-${{ github.sha }}
           path: ${{ matrix.artifact-glob }}
           if-no-files-found: error
           retention-days: 90

@@ -100,7 +100,7 @@ function sendOpenTarget(target: NotificationOpenTarget): void {
 function buildContextMenu(): Menu {
   return Menu.buildFromTemplate([
     {
-      label: 'Show ADO Visualizer',
+      label: 'Show Workthread',
       click: () => focusMainWindow()
     },
     { type: 'separator' },
@@ -143,8 +143,8 @@ function formatTooltip(counts: CountsSnapshot): string {
       `${counts.mentions} new mention${counts.mentions === 1 ? '' : 's'}`
     )
   }
-  if (segments.length === 0) return 'ADO Visualizer'
-  return `ADO Visualizer — ${segments.join(' · ')}`
+  if (segments.length === 0) return 'Workthread'
+  return `Workthread — ${segments.join(' · ')}`
 }
 
 function applyCounts(counts: CountsSnapshot): void {
@@ -172,7 +172,7 @@ export function createTray(window: BrowserWindow): void {
   }
   const icon = loadTrayIcon()
   tray = new Tray(icon)
-  tray.setToolTip('ADO Visualizer')
+  tray.setToolTip('Workthread')
   tray.setContextMenu(buildContextMenu())
   // Single-click on Windows / Linux toggles visibility; on macOS the
   // menu opens on click already and toggling on top of that would be

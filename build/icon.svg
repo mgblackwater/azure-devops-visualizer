@@ -1,0 +1,25 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#4338ca"/>
+      <stop offset="100%" stop-color="#6366f1"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="96" ry="96" fill="url(#bg)"/>
+
+  <!-- The thread: a continuous "W" stroke weaving through 4 work-item dots.
+       Rounded caps + joins read as a single piece of thread bent into shape. -->
+  <path d="M 96 144 L 192 368 L 320 144 L 416 368"
+        stroke="white"
+        stroke-width="32"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        fill="none"/>
+
+  <!-- Work-item nodes at each vertex of the W -->
+  <circle cx="96"  cy="144" r="42" fill="white"/>
+  <circle cx="192" cy="368" r="42" fill="white"/>
+  <circle cx="320" cy="144" r="42" fill="white"/>
+  <circle cx="416" cy="368" r="42" fill="white"/>
+</svg>

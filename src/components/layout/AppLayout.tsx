@@ -161,7 +161,7 @@ export default function AppLayout(): JSX.Element {
           {!sidebarCollapsed && (
             <Box sx={{ minWidth: 0 }}>
               <Typography variant="h6" sx={{ fontWeight: 600, lineHeight: 1.2 }} noWrap>
-                ADO Visualizer
+                Workthread
               </Typography>
               {orgLabel && (
                 <Typography variant="caption" color="text.secondary" noWrap component="div">

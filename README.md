@@ -1,8 +1,9 @@
-# ADO Visualizer
+# Workthread
 
-> An Electron desktop app for visualizing Azure DevOps work items as
-> trees, timelines, dependency graphs, sprint kanbans, and richer wiki
-> pages with Mermaid support.
+> A desktop Azure DevOps work-item visualizer — trees, timelines,
+> dependency graphs, sprint kanbans, richer wiki pages with Mermaid
+> support, and a built-in Claude session tracker. Connect the dots
+> across your sprint without leaving your desktop.
 
 [![Build Installers](https://github.com/mgblackwater/azure-devops-visualizer/actions/workflows/build-installer.yml/badge.svg)](https://github.com/mgblackwater/azure-devops-visualizer/actions/workflows/build-installer.yml)
 [![Latest release](https://img.shields.io/github/v/release/mgblackwater/azure-devops-visualizer?include_prereleases&display_name=tag)](https://github.com/mgblackwater/azure-devops-visualizer/releases/latest)
@@ -20,13 +21,13 @@ page.
   Apps.
 - **macOS** — download the `*.dmg` for your CPU
   (`-arm64.dmg` for Apple Silicon, `-x64.dmg` for Intel), mount it,
-  drag **ADO Visualizer** to **Applications**.
+  drag **Workthread** to **Applications**.
   - **First launch:** the build is unsigned (no Apple Developer cert),
     so Gatekeeper will refuse on the first try. Right-click
-    **ADO Visualizer.app** → **Open** → confirm. macOS only asks
+    **Workthread.app** → **Open** → confirm. macOS only asks
     once. If the app stays quarantined, drop the attribute manually:
     ```bash
-    xattr -cr "/Applications/ADO Visualizer.app"
+    xattr -cr "/Applications/Workthread.app"
     ```
 
 Older builds and full release notes:
