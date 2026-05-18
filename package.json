@@ -1,6 +1,6 @@
 {
   "name": "workthread",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "Workthread — a desktop Azure DevOps work-item visualizer (Timeline, Graph, Hierarchy, Calendar) with a built-in Claude session tracker. Built on Electron + React.",
   "main": "out/main/main.js",

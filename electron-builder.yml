@@ -12,6 +12,10 @@ files:
   # so the same code path works in dev (project root) and in prod
   # (asar root). See electron/notifications/tray.ts.
   - electron/assets/**
+extraResources:
+  - from: electron/claude/prompts
+    to: claude/prompts
+    filter: ['**/*.md']
 extraMetadata:
   main: out/main/main.js
 win:
